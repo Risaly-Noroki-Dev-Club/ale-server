@@ -1,0 +1,23 @@
+[package]
+name = "ale-server"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP API server for Ale, My Eyes! - intelligent visual assistant"
+license = "MIT"
+repository = "https://github.com/Risaly-Noroki-Dev-Club/ale-server"
+
+[dependencies]
+ale-core = { git = "https://github.com/Risaly-Noroki-Dev-Club/ale-my-eyes.git" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+axum = { version = "0.7", features = ["multipart"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+hyper = { version = "1", features = ["full"] }
+bytes = "1"
+base64 = "0.22"
