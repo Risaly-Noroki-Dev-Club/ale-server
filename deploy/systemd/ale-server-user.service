@@ -1,0 +1,82 @@
+# ale-server - headless Ale, My Eyes! backend service (systemd --user unit)
+#
+# Use this unit instead of the system unit when the service must take screenshots
+# and/or inject input, because those backends need access to the logged-in
+# graphical session (Wayland or X11) and to /dev/uinput for ydotool/dotool.
+#
+# Enable (inside the graphical login of the account that owns the display):
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ale-server.service
+#   journalctl --user -u ale-server -f
+#
+# Headless / no desktop auto-login? Enable lingering and make the unit start at
+# boot, but note that without a display session capture/automation report
+# CAPABILITY_UNAVAILABLE - the HTTP API, device pairing and egress still work:
+#   loginctl enable-linger "$USER"
+#   systemctl --user enable ale-server.service
+#
+# Ordering: graphical-session.target is only started by desktop environments
+# that implement it (GNOME, KDE Plasma, ...). On wlroots/sway add
+# `exec systemctl --user start graphical-session.target` to your compositor
+# config, or simply start the unit manually after the session is up.
+#
+# Install:   ./install.sh --user             (from an unpacked release tarball)
+# Docs:      docs/DEPLOY.md
+
+[Unit]
+Description=Ale, My Eyes! headless backend (user session: capture + automation)
+Documentation=file:///usr/share/doc/ale-server/README.md
+Documentation=https://github.com/Risaly-Noroki-Dev-Club/ale-server
+# Capture needs a live Wayland/X11 session: start after it and stop with it.
+After=graphical-session.target
+PartOf=graphical-session.target
+# Do not wait for network-online in a user session (the user manager usually
+# becomes available before the network); the service tolerates a late network.
+Wants=dbus.socket
+
+[Service]
+Type=simple
+# The deploy template assumes a system-wide install (same paths as the system
+# unit). `install.sh --user` rewrites this line to the per-user paths:
+#   ExecStart=%h/.local/bin/ale-server --config %h/.config/ale/ale-server.toml
+ExecStart=/usr/lib/ale/ale-server --config /etc/ale/ale-server.toml
+
+# Per-user secrets and overrides (same syntax as /etc/ale/ale-server.env).
+# `install.sh --user` creates this file with mode 0600.
+EnvironmentFile=-%h/.config/ale/ale-server.env
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# The systemd user manager imports the desktop session environment at login, so
+# XDG_SESSION_TYPE, DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR and XAUTHORITY are
+# inherited by the service. If your display manager does not do this, set them
+# explicitly (or use ~/.config/environment.d/ale.conf):
+#   Environment=XDG_SESSION_TYPE=wayland
+#   Environment=WAYLAND_DISPLAY=wayland-0
+#   Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=RUST_LOG=info
+
+# --- sandboxing -------------------------------------------------------------
+# Deliberately *no* PrivateDevices=/ProtectSystem=strict here: /dev/uinput must
+# stay reachable for ydotool/dotool, and the engine may write its config/cache
+# under $HOME. Run only the safe subset for an unprivileged user service.
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ale-server
+
+[Install]
+WantedBy=graphical-session.target

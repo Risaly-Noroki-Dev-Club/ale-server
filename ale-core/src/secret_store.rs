@@ -1,0 +1,126 @@
+use crate::{AleError, Result};
+
+const SERVICE: &str = "com.alemyeyes.cloud-api";
+const ACCOUNT: &str = "default";
+const BACKUP_ACCOUNT: &str = "backup";
+const TRANSCRIPTION_ACCOUNT: &str = "transcription";
+
+/// Stores credentials outside the application configuration file.
+pub trait SecretStore: Send + Sync {
+    fn get_transcription_api_key(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn set_transcription_api_key(&self, _key: &str) -> Result<()> {
+        Err(AleError::ConfigError(
+            "Credential store does not support independent transcription keys".into(),
+        ))
+    }
+    fn delete_transcription_api_key(&self) -> Result<()> {
+        Ok(())
+    }
+    fn get_api_key(&self) -> Result<Option<String>>;
+    fn set_api_key(&self, api_key: &str) -> Result<()>;
+    fn delete_api_key(&self) -> Result<()>;
+
+    fn get_backup_api_key(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn set_backup_api_key(&self, _api_key: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete_backup_api_key(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub struct SystemSecretStore;
+
+impl SystemSecretStore {
+    fn entry(account: &str) -> Result<keyring::Entry> {
+        let service = std::env::var("ALE_TEST_CREDENTIAL_NAMESPACE")
+            .ok()
+            .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+            .map(|id| format!("{SERVICE}.acceptance.{id}"))
+            .unwrap_or_else(|| SERVICE.to_string());
+        keyring::Entry::new(&service, account)
+            .map_err(|error| AleError::ConfigError(format!("无法初始化系统凭据库: {error}")))
+    }
+}
+
+impl SecretStore for SystemSecretStore {
+    fn get_transcription_api_key(&self) -> Result<Option<String>> {
+        match Self::entry(TRANSCRIPTION_ACCOUNT)?.get_password() {
+            Ok(key) => Ok(Some(key)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(AleError::ConfigError(
+                "Cannot read transcription credential".into(),
+            )),
+        }
+    }
+    fn set_transcription_api_key(&self, key: &str) -> Result<()> {
+        Self::entry(TRANSCRIPTION_ACCOUNT)?
+            .set_password(key)
+            .map_err(|_| AleError::ConfigError("Cannot save transcription credential".into()))
+    }
+    fn delete_transcription_api_key(&self) -> Result<()> {
+        match Self::entry(TRANSCRIPTION_ACCOUNT)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(AleError::ConfigError(
+                "Cannot delete transcription credential".into(),
+            )),
+        }
+    }
+    fn get_api_key(&self) -> Result<Option<String>> {
+        match Self::entry(ACCOUNT)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(AleError::ConfigError(format!(
+                "无法读取系统凭据库: {error}"
+            ))),
+        }
+    }
+
+    fn set_api_key(&self, api_key: &str) -> Result<()> {
+        Self::entry(ACCOUNT)?
+            .set_password(api_key)
+            .map_err(|error| {
+                AleError::ConfigError(format!("无法保存 API Key 到系统凭据库: {error}"))
+            })
+    }
+
+    fn delete_api_key(&self) -> Result<()> {
+        match Self::entry(ACCOUNT)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(AleError::ConfigError(format!(
+                "无法删除系统凭据库中的 API Key: {error}"
+            ))),
+        }
+    }
+
+    fn get_backup_api_key(&self) -> Result<Option<String>> {
+        match Self::entry(BACKUP_ACCOUNT)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(AleError::ConfigError(format!(
+                "无法读取备用 API Key: {error}"
+            ))),
+        }
+    }
+
+    fn set_backup_api_key(&self, api_key: &str) -> Result<()> {
+        Self::entry(BACKUP_ACCOUNT)?
+            .set_password(api_key)
+            .map_err(|error| AleError::ConfigError(format!("无法保存备用 API Key: {error}")))
+    }
+
+    fn delete_backup_api_key(&self) -> Result<()> {
+        match Self::entry(BACKUP_ACCOUNT)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(AleError::ConfigError(format!(
+                "无法删除备用 API Key: {error}"
+            ))),
+        }
+    }
+}

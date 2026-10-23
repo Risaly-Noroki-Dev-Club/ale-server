@@ -1,0 +1,1249 @@
+use crate::secret_store::{SecretStore, SystemSecretStore};
+use crate::{AleError, Result};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub(crate) fn atomic_config_write(path: &Path, content: &[u8]) -> Result<()> {
+    crate::diagnostics::record(
+        "atomic_file_write_start",
+        &[("bytes", content.len() as u64)],
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(content)?;
+        crate::diagnostics::record("atomic_file_sync_start", &[]);
+        file.sync_all()?;
+        crate::diagnostics::record("atomic_file_sync_done", &[]);
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    crate::diagnostics::record(
+        "atomic_file_write_done",
+        &[("success", result.is_ok() as u64)],
+    );
+    result
+}
+
+/// 云端API配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudApiConfig {
+    pub wire_api: crate::model_api::WireApi,
+    pub provider: String,
+    #[serde(skip_serializing, default)]
+    pub api_key: String,
+    pub api_url: String,
+    pub model: String,
+    pub max_tokens: usize,
+    pub timeout: u32,
+}
+
+impl Default for CloudApiConfig {
+    fn default() -> Self {
+        Self {
+            wire_api: Default::default(),
+            provider: "openai".to_string(),
+            api_key: String::new(),
+            api_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            max_tokens: 1024,
+            timeout: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteRoutingConfig {
+    pub backup: Option<CloudApiConfig>,
+    pub backup_enabled: bool,
+    pub backup_pre_authorized: bool,
+    pub circuit_failure_threshold: u32,
+    pub circuit_open_seconds: u32,
+}
+
+impl Default for RemoteRoutingConfig {
+    fn default() -> Self {
+        Self {
+            backup: None,
+            backup_enabled: false,
+            backup_pre_authorized: false,
+            circuit_failure_threshold: 3,
+            circuit_open_seconds: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelSchedulerConfig {
+    pub enabled: bool,
+    pub require_download_consent: bool,
+    pub local_vlm_gpu_only: bool,
+    pub idle_ttl_seconds: u32,
+    pub minimum_default_vram_bytes: u64,
+    pub minimum_large_vram_bytes: u64,
+    pub qwen_model: String,
+    pub qwen_large_model: String,
+    pub grounding_model: String,
+    pub full_screenshot_requires_confirmation: bool,
+}
+
+impl Default for ModelSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            require_download_consent: true,
+            local_vlm_gpu_only: true,
+            idle_ttl_seconds: 120,
+            minimum_default_vram_bytes: crate::model_scheduler::MIN_DEFAULT_VRAM_BYTES,
+            minimum_large_vram_bytes: crate::model_scheduler::MIN_LARGE_VRAM_BYTES,
+            qwen_model: "Qwen2.5-VL-3B-Instruct".to_string(),
+            qwen_large_model: "Qwen2.5-VL-7B-Instruct".to_string(),
+            grounding_model: "ShowUI-2B".to_string(),
+            full_screenshot_requires_confirmation: true,
+        }
+    }
+}
+
+/// 模型配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelsConfig {
+    pub auto_download: bool,
+    pub max_download_size: u64,
+    pub preferred_quality: String,
+    pub offline_mode: bool,
+    pub models_dir: String,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            auto_download: false,
+            max_download_size: 500 * 1024 * 1024, // 500MB
+            preferred_quality: "balanced".to_string(),
+            offline_mode: false,
+            models_dir: "models".to_string(),
+        }
+    }
+}
+
+/// 推理配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InferenceConfig {
+    pub mode: String, // "local", "cloud", "adaptive"
+    pub prefer_cloud: bool,
+    pub timeout: u32,
+    pub fallback_to_local: bool,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            mode: "adaptive".to_string(),
+            prefer_cloud: false,
+            timeout: 30,
+            fallback_to_local: false,
+        }
+    }
+}
+
+/// 音频配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub buffer_size: u32,
+    pub voice: String,
+    pub speed: f32,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 16000,
+            channels: 1,
+            buffer_size: 4096,
+            voice: "default".to_string(),
+            speed: 1.0,
+        }
+    }
+}
+
+/// ASR 语音识别配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AsrConfig {
+    /// Whisper 采样策略: "greedy" 或 "beam"
+    pub sampling_strategy: String,
+    /// Beam search 宽度 (仅 beam 模式生效)
+    pub beam_size: u32,
+    /// 初始提示词，帮助模型理解上下文
+    pub initial_prompt: String,
+    /// 解码温度 (0.0 = 确定性, 越高越随机)
+    pub temperature: f32,
+    /// 强制语言 (空字符串 = auto)
+    pub language: String,
+    /// 弱语音模式：降低 VAD 阈值、延长静默等待
+    pub weak_voice_mode: bool,
+}
+
+impl Default for AsrConfig {
+    fn default() -> Self {
+        Self {
+            sampling_strategy: "greedy".to_string(),
+            beam_size: 3,
+            initial_prompt: String::new(),
+            temperature: 0.0,
+            language: String::new(),
+            weak_voice_mode: false,
+        }
+    }
+}
+
+/// 界面配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub language: String,
+    pub theme: String,
+    pub font_size: u32,
+    pub high_contrast: bool,
+    pub screen_reader: bool,
+    pub auto_speak: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            language: "zh-CN".to_string(),
+            theme: "system".to_string(),
+            font_size: 16,
+            high_contrast: false,
+            screen_reader: true,
+            auto_speak: true,
+        }
+    }
+}
+
+/// 应用配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranscriptionConfig {
+    pub enabled: bool,
+    pub endpoint: CloudApiConfig,
+}
+impl Default for TranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: CloudApiConfig {
+                model: "whisper-1".into(),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AppConfig {
+    pub transcription: TranscriptionConfig,
+    pub cloud_api: CloudApiConfig,
+    pub remote_routing: RemoteRoutingConfig,
+    pub model_scheduler: ModelSchedulerConfig,
+    pub models: ModelsConfig,
+    pub inference: InferenceConfig,
+    pub audio: AudioConfig,
+    pub asr: AsrConfig,
+    pub ui: UiConfig,
+}
+
+/// 配置管理器
+#[derive(Clone)]
+pub struct ConfigManager {
+    config_path: PathBuf,
+    config: AppConfig,
+    secret_store: Arc<dyn SecretStore>,
+}
+
+impl ConfigManager {
+    pub fn new(config_path: &Path) -> Self {
+        Self::with_secret_store(config_path, Arc::new(SystemSecretStore))
+    }
+
+    pub fn with_secret_store(config_path: &Path, secret_store: Arc<dyn SecretStore>) -> Self {
+        Self {
+            config_path: config_path.to_path_buf(),
+            config: AppConfig::default(),
+            secret_store,
+        }
+    }
+
+    /// 加载配置
+    pub fn load(&mut self) -> Result<()> {
+        crate::diagnostics::record("config_load_start", &[]);
+        if !self.config_path.exists() {
+            // 如果配置文件不存在，创建默认配置
+            self.save()?;
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&self.config_path)?;
+        let legacy_transcription = serde_json::from_str::<serde_json::Value>(&content)?
+            .get("transcription")
+            .is_none();
+        let mut config: AppConfig = serde_json::from_str(&content)?;
+        #[cfg(not(feature = "local-inference"))]
+        if !config.model_scheduler.enabled && config.inference.mode != "cloud" {
+            config.inference.mode = "cloud".to_string();
+            config.inference.prefer_cloud = true;
+            config.inference.fallback_to_local = false;
+        }
+        if config.cloud_api.api_key.trim().is_empty() {
+            config.cloud_api.api_key = self.secret_store.get_api_key()?.unwrap_or_default();
+        }
+        if let Some(backup) = config.remote_routing.backup.as_mut() {
+            if backup.api_key.trim().is_empty() {
+                backup.api_key = self.secret_store.get_backup_api_key()?.unwrap_or_default();
+            }
+        }
+        if legacy_transcription {
+            config.transcription = TranscriptionConfig {
+                enabled: !config.cloud_api.api_key.is_empty(),
+                endpoint: CloudApiConfig {
+                    model: "whisper-1".into(),
+                    wire_api: Default::default(),
+                    ..config.cloud_api.clone()
+                },
+            };
+        } else if config.transcription.endpoint.api_key.is_empty() {
+            config.transcription.endpoint.api_key = self
+                .secret_store
+                .get_transcription_api_key()?
+                .unwrap_or_default();
+        }
+        self.update_config(config)
+    }
+
+    /// 保存配置
+    pub fn save(&self) -> Result<()> {
+        ConfigValidator::validate_model_endpoints(&self.config)?;
+        // 确保目录存在
+        if let Some(parent) = self.config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = serde_json::to_string_pretty(&self.config)?;
+        atomic_config_write(&self.config_path, content.as_bytes())?;
+        Ok(())
+    }
+
+    /// 获取配置
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    /// 更新配置
+    pub fn update_config(&mut self, config: AppConfig) -> Result<()> {
+        ConfigValidator::validate_model_endpoints(&config)?;
+        crate::diagnostics::record("credentials_read_start", &[]);
+        let old_keys = (
+            self.secret_store.get_api_key()?,
+            self.secret_store.get_backup_api_key()?,
+            self.secret_store.get_transcription_api_key()?,
+        );
+        crate::diagnostics::record("credentials_read_done", &[]);
+        let result = (|| -> Result<()> {
+            crate::diagnostics::record("credentials_write_start", &[]);
+            if config.cloud_api.api_key.trim().is_empty() {
+                self.secret_store.delete_api_key()?;
+            } else {
+                self.secret_store.set_api_key(&config.cloud_api.api_key)?;
+            }
+            match config.remote_routing.backup.as_ref() {
+                Some(backup) if !backup.api_key.trim().is_empty() => {
+                    self.secret_store.set_backup_api_key(&backup.api_key)?;
+                }
+                _ => self.secret_store.delete_backup_api_key()?,
+            }
+            if config.transcription.endpoint.api_key.is_empty() {
+                self.secret_store.delete_transcription_api_key()?;
+            } else {
+                self.secret_store
+                    .set_transcription_api_key(&config.transcription.endpoint.api_key)?;
+            }
+            crate::diagnostics::record("credentials_write_done", &[]);
+            atomic_config_write(&self.config_path, &serde_json::to_vec_pretty(&config)?)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            crate::diagnostics::record("credentials_rollback_start", &[]);
+            let rollback = [
+                match old_keys.0 {
+                    Some(key) => self.secret_store.set_api_key(&key),
+                    None => self.secret_store.delete_api_key(),
+                },
+                match old_keys.1 {
+                    Some(key) => self.secret_store.set_backup_api_key(&key),
+                    None => self.secret_store.delete_backup_api_key(),
+                },
+                match old_keys.2 {
+                    Some(key) => self.secret_store.set_transcription_api_key(&key),
+                    None => self.secret_store.delete_transcription_api_key(),
+                },
+            ];
+            crate::diagnostics::record(
+                "credentials_rollback_done",
+                &[("success", rollback.iter().all(Result::is_ok) as u64)],
+            );
+            if rollback.iter().any(Result::is_err) {
+                return Err(AleError::ConfigError("Save failed; credential rollback also failed. Re-enter credentials before retrying.".into()));
+            }
+            return Err(error);
+        }
+        self.config = config;
+        crate::diagnostics::record("config_commit_done", &[]);
+        Ok(())
+    }
+
+    /// 更新云端API配置
+    pub fn update_cloud_api(&mut self, config: CloudApiConfig) {
+        self.config.cloud_api = config;
+    }
+
+    /// 更新模型配置
+    pub fn update_models(&mut self, config: ModelsConfig) {
+        self.config.models = config;
+    }
+
+    /// 更新推理配置
+    pub fn update_inference(&mut self, config: InferenceConfig) {
+        self.config.inference = config;
+    }
+
+    /// 更新音频配置
+    pub fn update_audio(&mut self, config: AudioConfig) {
+        self.config.audio = config;
+    }
+
+    /// 更新界面配置
+    pub fn update_ui(&mut self, config: UiConfig) {
+        self.config.ui = config;
+    }
+
+    /// 更新 ASR 配置
+    pub fn update_asr(&mut self, config: AsrConfig) {
+        self.config.asr = config;
+    }
+
+    /// 重置为默认配置
+    pub fn reset_to_default(&mut self) {
+        self.config = AppConfig::default();
+    }
+
+    /// 验证配置
+    pub fn validate(&self) -> Result<()> {
+        // 验证云端API配置
+        if self.config.cloud_api.api_key.is_empty() {
+            return Err(AleError::ConfigError("API key is required".to_string()));
+        }
+
+        // 验证模型配置
+        if self.config.models.max_download_size == 0 {
+            return Err(AleError::ConfigError(
+                "Max download size must be greater than 0".to_string(),
+            ));
+        }
+
+        // 验证推理配置
+        ConfigValidator::validate_inference(&self.config.inference)?;
+
+        // 验证 ASR 配置
+        ConfigValidator::validate_asr(&self.config.asr)?;
+
+        Ok(())
+    }
+
+    /// 获取配置文件路径
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+}
+
+/// 配置工厂
+pub struct ConfigFactory;
+
+impl ConfigFactory {
+    /// 创建默认配置管理器
+    pub fn create_default() -> ConfigManager {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ale-my-eyes");
+
+        let config_path = config_dir.join("config.json");
+        ConfigManager::new(&config_path)
+    }
+
+    /// 创建指定路径的配置管理器
+    pub fn create_with_path(config_path: &Path) -> ConfigManager {
+        ConfigManager::new(config_path)
+    }
+
+    /// 创建测试配置
+    pub fn create_test() -> ConfigManager {
+        let config_path = PathBuf::from("/tmp/ale-my-eyes-test/config.json");
+        ConfigManager::new(&config_path)
+    }
+}
+
+/// 配置迁移器
+pub struct ConfigMigrator;
+
+impl ConfigMigrator {
+    /// 迁移旧版本配置
+    pub fn migrate(config_path: &Path) -> Result<()> {
+        if !config_path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(config_path)?;
+        let old_config: serde_json::Value = serde_json::from_str(&content)?;
+
+        // 检查版本
+        let version = old_config
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0");
+
+        match version {
+            "1.0" => {
+                // 从 1.0 迁移到 2.0
+                Self::migrate_v1_to_v2(config_path, &old_config)?;
+            }
+            "2.0" => {
+                // 已经是最新版本
+            }
+            _ => {
+                return Err(AleError::ConfigError(format!(
+                    "Unknown config version: {}",
+                    version
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 从 v1.0 迁移到 v2.0
+    fn migrate_v1_to_v2(config_path: &Path, old_config: &serde_json::Value) -> Result<()> {
+        // 创建新的配置结构
+        let mut new_config = AppConfig::default();
+
+        // 迁移云端API配置
+        if let Some(cloud_api) = old_config.get("cloud_api") {
+            if let Some(provider) = cloud_api.get("provider").and_then(|v| v.as_str()) {
+                new_config.cloud_api.provider = provider.to_string();
+            }
+            if let Some(api_key) = cloud_api.get("api_key").and_then(|v| v.as_str()) {
+                new_config.cloud_api.api_key = api_key.to_string();
+            }
+        }
+
+        // 迁移模型配置
+        if let Some(models) = old_config.get("models") {
+            if let Some(auto_download) = models.get("auto_download").and_then(|v| v.as_bool()) {
+                new_config.models.auto_download = auto_download;
+            }
+        }
+
+        // 保存新配置
+        let content = serde_json::to_string_pretty(&new_config)?;
+        std::fs::write(config_path, content)?;
+
+        Ok(())
+    }
+}
+
+/// 配置验证器
+pub struct ConfigValidator;
+
+impl ConfigValidator {
+    pub fn validate_model_endpoints(config: &AppConfig) -> Result<()> {
+        for endpoint in std::iter::once(&config.cloud_api)
+            .chain(config.remote_routing.backup.iter())
+            .chain(std::iter::once(&config.transcription.endpoint))
+        {
+            Self::validate_cloud_api_transport(&endpoint.api_url)?;
+            if endpoint.timeout == 0 || endpoint.timeout > 80 || endpoint.max_tokens == 0 {
+                return Err(AleError::ConfigError(
+                    "Timeout must be 1-80 seconds and token limit must be positive".into(),
+                ));
+            }
+        }
+        if !config.cloud_api.api_key.trim().is_empty() {
+            Self::validate_cloud_api(&config.cloud_api)?;
+        }
+        if config.remote_routing.backup_enabled {
+            if !config.remote_routing.backup_pre_authorized {
+                return Err(AleError::ConfigError(
+                    "Backup endpoint requires explicit authorization".into(),
+                ));
+            }
+            Self::validate_cloud_api(
+                config
+                    .remote_routing
+                    .backup
+                    .as_ref()
+                    .ok_or_else(|| AleError::ConfigError("Backup endpoint is required".into()))?,
+            )?;
+        }
+        if config.transcription.enabled {
+            Self::validate_cloud_api(&config.transcription.endpoint)?;
+            if !matches!(
+                config.transcription.endpoint.wire_api,
+                crate::model_api::WireApi::OpenaiChatCompletions
+                    | crate::model_api::WireApi::OpenaiResponses
+            ) {
+                return Err(AleError::ConfigError(
+                    "Transcription requires an OpenAI-compatible endpoint".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_cloud_api_transport(api_url: &str) -> Result<()> {
+        let parsed = url::Url::parse(api_url)
+            .map_err(|error| AleError::ConfigError(format!("Invalid API URL: {error}")))?;
+        if parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AleError::ConfigError(
+                "Use a base API URL without credentials, query parameters, or fragment".into(),
+            ));
+        }
+        match parsed.scheme() {
+            "https" => Ok(()),
+            "http" => {
+                let loopback = match parsed.host() {
+                    Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                    Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                    Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                    None => false,
+                };
+                if loopback {
+                    Ok(())
+                } else {
+                    Err(AleError::ConfigError(
+                        "HTTP API URLs are allowed only for localhost or loopback addresses"
+                            .to_string(),
+                    ))
+                }
+            }
+            _ => Err(AleError::ConfigError(
+                "API URL must use HTTPS (HTTP is limited to loopback)".to_string(),
+            )),
+        }
+    }
+
+    /// 验证云端API配置
+    pub fn validate_cloud_api(config: &CloudApiConfig) -> Result<()> {
+        if config.api_key.is_empty() {
+            return Err(AleError::ConfigError("API key is required".to_string()));
+        }
+
+        if config.api_url.is_empty() {
+            return Err(AleError::ConfigError("API URL is required".to_string()));
+        }
+
+        Self::validate_cloud_api_transport(&config.api_url)?;
+
+        if config.model.is_empty() {
+            return Err(AleError::ConfigError("Model name is required".to_string()));
+        }
+
+        if config.timeout == 0 || config.timeout > 80 {
+            return Err(AleError::ConfigError(
+                "Timeout must be between 1 and 80 seconds".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// 验证模型配置
+    pub fn validate_models(config: &ModelsConfig) -> Result<()> {
+        if config.max_download_size == 0 {
+            return Err(AleError::ConfigError(
+                "Max download size must be greater than 0".to_string(),
+            ));
+        }
+
+        let valid_qualities = ["low", "balanced", "high"];
+        if !valid_qualities.contains(&config.preferred_quality.as_str()) {
+            return Err(AleError::ConfigError(format!(
+                "Invalid preferred quality: {}. Must be one of: {:?}",
+                config.preferred_quality, valid_qualities
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 验证推理配置
+    pub fn validate_inference(config: &InferenceConfig) -> Result<()> {
+        let valid_modes = ["local", "cloud", "adaptive"];
+        if !valid_modes.contains(&config.mode.as_str()) {
+            return Err(AleError::ConfigError(format!(
+                "Invalid inference mode: {}. Must be one of: {:?}",
+                config.mode, valid_modes
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 验证 ASR 配置
+    pub fn validate_asr(config: &AsrConfig) -> Result<()> {
+        let valid_strategies = ["greedy", "beam"];
+        if !valid_strategies.contains(&config.sampling_strategy.as_str()) {
+            return Err(AleError::ConfigError(format!(
+                "Invalid sampling strategy: '{}'. Must be one of: {:?}",
+                config.sampling_strategy, valid_strategies
+            )));
+        }
+
+        if config.beam_size == 0 {
+            return Err(AleError::ConfigError(
+                "Beam size must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.beam_size > 10 {
+            return Err(AleError::ConfigError(format!(
+                "Beam size {} is too large (max 10)",
+                config.beam_size
+            )));
+        }
+
+        if !config.temperature.is_finite() || config.temperature < 0.0 || config.temperature > 2.0 {
+            return Err(AleError::ConfigError(format!(
+                "Temperature must be a finite number in [0.0, 2.0], got {}",
+                config.temperature
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 验证完整配置
+    pub fn validate_all(config: &AppConfig) -> Result<()> {
+        Self::validate_cloud_api(&config.cloud_api)?;
+        Self::validate_models(&config.models)?;
+        Self::validate_inference(&config.inference)?;
+        Self::validate_asr(&config.asr)?;
+        if config.remote_routing.backup_enabled {
+            let backup = config.remote_routing.backup.as_ref().ok_or_else(|| {
+                AleError::ConfigError(
+                    "Backup cloud endpoint is enabled but not configured".to_string(),
+                )
+            })?;
+            Self::validate_cloud_api(backup)?;
+            if !config.remote_routing.backup_pre_authorized {
+                return Err(AleError::ConfigError(
+                    "Backup cloud endpoint requires explicit pre-authorization".to_string(),
+                ));
+            }
+        }
+        if config.model_scheduler.idle_ttl_seconds == 0 {
+            return Err(AleError::ConfigError(
+                "Model scheduler idle TTL must be greater than zero".to_string(),
+            ));
+        }
+
+        if config.ui.font_size == 0 {
+            return Err(AleError::ConfigError(
+                "Font size must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestSecretStore(
+        Mutex<Option<String>>,
+        Mutex<Option<String>>,
+        Mutex<Option<String>>,
+    );
+
+    impl SecretStore for TestSecretStore {
+        fn get_backup_api_key(&self) -> Result<Option<String>> {
+            Ok(self.1.lock().unwrap().clone())
+        }
+        fn set_backup_api_key(&self, key: &str) -> Result<()> {
+            *self.1.lock().unwrap() = Some(key.into());
+            Ok(())
+        }
+        fn delete_backup_api_key(&self) -> Result<()> {
+            *self.1.lock().unwrap() = None;
+            Ok(())
+        }
+        fn get_transcription_api_key(&self) -> Result<Option<String>> {
+            Ok(self.2.lock().unwrap().clone())
+        }
+        fn set_transcription_api_key(&self, key: &str) -> Result<()> {
+            *self.2.lock().unwrap() = Some(key.into());
+            Ok(())
+        }
+        fn delete_transcription_api_key(&self) -> Result<()> {
+            *self.2.lock().unwrap() = None;
+            Ok(())
+        }
+        fn get_api_key(&self) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn set_api_key(&self, api_key: &str) -> Result<()> {
+            *self.0.lock().unwrap() = Some(api_key.to_string());
+            Ok(())
+        }
+
+        fn delete_api_key(&self) -> Result<()> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.cloud_api.provider, "openai");
+        assert_eq!(config.cloud_api.api_url, "https://api.openai.com/v1");
+        assert_eq!(config.cloud_api.model, "gpt-4o");
+        assert_eq!(config.cloud_api.max_tokens, 1024);
+        assert_eq!(config.cloud_api.timeout, 30);
+        assert_eq!(config.ui.language, "zh-CN");
+        assert_eq!(config.ui.font_size, 16);
+        assert!(!config.ui.high_contrast);
+    }
+
+    #[test]
+    fn transcription_migrates_once_and_credentials_remain_independent() {
+        let dir = std::env::temp_dir().join(format!("ale-migration-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"cloud_api":{"api_key":"legacy-key","api_url":"https://example.test/v1","model":"vision"}}"#).unwrap();
+        let store = Arc::new(TestSecretStore::default());
+        let mut manager = ConfigManager::with_secret_store(&path, store.clone());
+        manager.load().unwrap();
+        assert!(manager.config().transcription.enabled);
+        assert_eq!(manager.config().transcription.endpoint.model, "whisper-1");
+        assert_eq!(
+            store.get_transcription_api_key().unwrap().as_deref(),
+            Some("legacy-key")
+        );
+        let mut updated = manager.config().clone();
+        updated.cloud_api.api_key = "primary-secret-unique".into();
+        updated.cloud_api.api_url = "https://new-primary.test/v1".into();
+        updated.cloud_api.wire_api = crate::model_api::WireApi::AnthropicMessages;
+        updated.remote_routing.backup = Some(CloudApiConfig {
+            api_key: "backup-key".into(),
+            ..Default::default()
+        });
+        manager.update_config(updated).unwrap();
+        let mut reloaded = ConfigManager::with_secret_store(&path, store.clone());
+        reloaded.load().unwrap();
+        assert_eq!(reloaded.config().cloud_api.api_key, "primary-secret-unique");
+        assert_eq!(
+            reloaded.config().transcription.endpoint.api_key,
+            "legacy-key"
+        );
+        assert_eq!(
+            reloaded.config().transcription.endpoint.api_url,
+            "https://example.test/v1"
+        );
+        assert_eq!(
+            reloaded
+                .config()
+                .remote_routing
+                .backup
+                .as_ref()
+                .unwrap()
+                .api_key,
+            "backup-key"
+        );
+        let contents = std::fs::read_to_string(&path).unwrap();
+        for key in ["legacy-key", "primary-secret-unique", "backup-key"] {
+            assert!(!contents.contains(key));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_atomic_save_rolls_back_all_credentials_and_memory() {
+        let dir = std::env::temp_dir().join(format!("ale-rollback-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        let store = Arc::new(TestSecretStore::default());
+        let mut manager = ConfigManager::with_secret_store(&path, store.clone());
+        let mut original = AppConfig::default();
+        original.cloud_api.api_key = "primary-old".into();
+        original.remote_routing.backup = Some(CloudApiConfig {
+            api_key: "backup-old".into(),
+            ..Default::default()
+        });
+        original.transcription.endpoint.api_key = "asr-old".into();
+        manager.update_config(original.clone()).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        manager.config_path = dir.join("blocked");
+        std::fs::create_dir_all(&manager.config_path).unwrap();
+        let mut changed = original;
+        changed.cloud_api.api_key = "primary-new".into();
+        changed.remote_routing.backup.as_mut().unwrap().api_key = "backup-new".into();
+        changed.transcription.endpoint.api_key = "asr-new".into();
+        assert!(manager.update_config(changed).is_err());
+        assert_eq!(manager.config().cloud_api.api_key, "primary-old");
+        assert_eq!(store.get_api_key().unwrap().as_deref(), Some("primary-old"));
+        assert_eq!(
+            store.get_backup_api_key().unwrap().as_deref(),
+            Some("backup-old")
+        );
+        assert_eq!(
+            store.get_transcription_api_key().unwrap().as_deref(),
+            Some("asr-old")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), saved);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "temporary file leaked"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn model_endpoint_policy_requires_valid_timeouts_and_backup_consent() {
+        let mut config = AppConfig::default();
+        assert!(!config.transcription.enabled);
+        assert!(!config.remote_routing.backup_enabled);
+        config.cloud_api.timeout = 81;
+        assert!(ConfigValidator::validate_model_endpoints(&config).is_err());
+        config.cloud_api.timeout = 60;
+        config.remote_routing.backup_enabled = true;
+        config.remote_routing.backup = Some(CloudApiConfig {
+            api_key: "test".into(),
+            ..Default::default()
+        });
+        assert!(ConfigValidator::validate_model_endpoints(&config).is_err());
+        config.remote_routing.backup_pre_authorized = true;
+        assert!(ConfigValidator::validate_model_endpoints(&config).is_ok());
+    }
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let config = AppConfig::default();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.cloud_api.provider, config.cloud_api.provider);
+        assert_eq!(restored.cloud_api.api_url, config.cloud_api.api_url);
+        assert_eq!(restored.ui.language, config.ui.language);
+    }
+
+    #[test]
+    fn test_validate_cloud_api_missing_key() {
+        let config = CloudApiConfig {
+            api_key: String::new(),
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_cloud_api(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_cloud_api_bad_url() {
+        let config = CloudApiConfig {
+            api_key: "sk-test".to_string(),
+            api_url: "not-a-url".to_string(),
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_cloud_api(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_cloud_api_valid() {
+        let config = CloudApiConfig {
+            api_key: "sk-test".to_string(),
+            api_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_cloud_api(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cloud_api_rejects_public_http() {
+        for url in [
+            "http://example.com/v1",
+            "http://localhost.example.com/v1",
+            "http://192.168.1.20:8080/v1",
+            "http://10.0.0.2/v1",
+        ] {
+            assert!(
+                ConfigValidator::validate_cloud_api_transport(url).is_err(),
+                "public HTTP URL should be rejected: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cloud_api_allows_loopback_http() {
+        for url in [
+            "http://localhost:8080/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.2:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://[0:0:0:0:0:0:0:1]:8080/v1",
+        ] {
+            assert!(
+                ConfigValidator::validate_cloud_api_transport(url).is_ok(),
+                "loopback HTTP URL should be allowed: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_save_rejects_public_http_after_direct_section_update() {
+        let dir = std::env::temp_dir().join(format!("ale-config-http-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        let mut manager =
+            ConfigManager::with_secret_store(&path, Arc::new(TestSecretStore::default()));
+        manager.update_cloud_api(CloudApiConfig {
+            api_url: "http://example.com/v1".to_string(),
+            ..Default::default()
+        });
+
+        assert!(manager.save().is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_validate_inference_invalid_mode() {
+        let config = InferenceConfig {
+            mode: "invalid".to_string(),
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_inference(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_all_valid() {
+        let config = AppConfig::default();
+        let mut config = config;
+        config.cloud_api.api_key = "sk-test".to_string();
+        assert!(ConfigValidator::validate_all(&config).is_ok());
+    }
+
+    #[test]
+    fn test_config_manager_load_creates_default() {
+        let path = std::path::PathBuf::from("/tmp/ale-my-eyes-test-unit/config.json");
+        let _ = std::fs::remove_file(&path);
+        let mut manager = ConfigManager::new(&path);
+        manager.load().unwrap();
+        assert_eq!(manager.config().cloud_api.provider, "openai");
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_config_manager_loads_legacy_ui_without_auto_speak() {
+        let dir = std::path::PathBuf::from("/tmp/ale-my-eyes-test-legacy-ui");
+        let path = dir.join("config.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+  "cloud_api": {
+    "provider": "openai",
+    "api_key": "sk-test",
+    "api_url": "https://api.openai.com/v1",
+    "model": "gpt-4o",
+    "max_tokens": 1024,
+    "timeout": 30
+  },
+  "models": {
+    "auto_download": true,
+    "max_download_size": 524288000,
+    "preferred_quality": "balanced",
+    "offline_mode": false,
+    "models_dir": "models"
+  },
+  "inference": {
+    "mode": "adaptive",
+    "prefer_cloud": true,
+    "timeout": 30,
+    "fallback_to_local": true
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "buffer_size": 4096,
+    "voice": "default",
+    "speed": 1.0
+  },
+  "ui": {
+    "language": "zh-CN",
+    "theme": "system",
+    "font_size": 16,
+    "high_contrast": false,
+    "screen_reader": true
+  }
+}"#,
+        )
+        .unwrap();
+
+        let secret_store = Arc::new(TestSecretStore::default());
+        let mut manager = ConfigManager::with_secret_store(&path, secret_store.clone());
+        manager.load().unwrap();
+
+        assert!(manager.config().ui.auto_speak);
+        assert_eq!(
+            secret_store.get_api_key().unwrap().as_deref(),
+            Some("sk-test")
+        );
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("auto_speak"));
+        assert!(!saved.contains("sk-test"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_config_missing_sections_use_defaults() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"cloud_api":{"api_key":"sk-test"}}"#).unwrap();
+
+        assert_eq!(config.cloud_api.api_key, "sk-test");
+        assert_eq!(config.cloud_api.provider, "openai");
+        assert_eq!(config.inference.mode, "adaptive");
+        assert_eq!(config.audio.sample_rate, 16000);
+        assert!(config.ui.auto_speak);
+    }
+
+    #[test]
+    fn test_validate_asr_valid_defaults() {
+        let config = AsrConfig::default();
+        assert!(ConfigValidator::validate_asr(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_asr_rejects_bad_strategy() {
+        let config = AsrConfig {
+            sampling_strategy: "top_k".to_string(),
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_asr(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_asr_rejects_zero_beam_size() {
+        let config = AsrConfig {
+            sampling_strategy: "beam".to_string(),
+            beam_size: 0,
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_asr(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_asr_rejects_nan_temperature() {
+        let config = AsrConfig {
+            temperature: f32::NAN,
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_asr(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_asr_rejects_excessive_temperature() {
+        let config = AsrConfig {
+            temperature: 5.0,
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_asr(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_asr_rejects_large_beam_size() {
+        let config = AsrConfig {
+            sampling_strategy: "beam".to_string(),
+            beam_size: 20,
+            ..Default::default()
+        };
+        assert!(ConfigValidator::validate_asr(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_all_includes_asr() {
+        let mut config = AppConfig::default();
+        config.cloud_api.api_key = "sk-test".to_string();
+        config.asr.temperature = f32::INFINITY;
+        assert!(ConfigValidator::validate_all(&config).is_err());
+    }
+
+    #[test]
+    fn config_file_io_stress_preserves_latest_value_and_redacts_secret() {
+        let dir = std::env::temp_dir().join(format!("ale-config-stress-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        let secret_store = Arc::new(TestSecretStore::default());
+        let mut manager = ConfigManager::with_secret_store(&path, secret_store.clone());
+
+        for iteration in 0..1_000 {
+            let mut config = manager.config().clone();
+            config.cloud_api.api_key = "stress-secret".to_string();
+            config.cloud_api.model = format!("model-{iteration}");
+            manager.update_config(config).unwrap();
+
+            let mut reloaded = ConfigManager::with_secret_store(&path, secret_store.clone());
+            reloaded.load().unwrap();
+            assert_eq!(
+                reloaded.config().cloud_api.model,
+                format!("model-{iteration}")
+            );
+            assert_eq!(reloaded.config().cloud_api.api_key, "stress-secret");
+            manager = reloaded;
+        }
+
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(!serialized.contains("stress-secret"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

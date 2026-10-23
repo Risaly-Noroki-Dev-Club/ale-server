@@ -1,0 +1,85 @@
+# ale-server - headless Ale, My Eyes! backend service (system unit)
+#
+# Runs the HTTP API and the encrypted device channel without any GUI stack.
+# Screen capture and automation that need a logged-in desktop session should be
+# provided by the *user* unit (deploy/systemd/ale-server-user.service); this
+# system unit is the right choice for a server that only serves the cloud engine
+# and the network API/egress proxy.
+#
+# Install:   sudo ./install.sh --system      (from an unpacked release tarball)
+# Logs:      journalctl -u ale-server -f     (pairing code is logged at INFO)
+# Docs:      docs/DEPLOY.md
+
+[Unit]
+Description=Ale, My Eyes! headless backend (HTTP API + encrypted device channel)
+Documentation=file:///usr/share/doc/ale-server/README.md
+Documentation=https://github.com/Risaly-Noroki-Dev-Club/ale-server
+After=network-online.target
+Wants=network-online.target
+# No graphical session is required: the service starts headless, and capture
+# requests return CAPABILITY_UNAVAILABLE until a display backend is reachable.
+
+[Service]
+Type=simple
+User=ale
+Group=ale
+
+# systemd owns the runtime directories:
+#   /var/lib/ale  - engine state, audit/write paths (StateDirectory)
+#   /etc/ale      - configuration directory (ConfigurationDirectory)
+StateDirectory=ale
+StateDirectoryMode=0750
+ConfigurationDirectory=ale
+ConfigurationDirectoryMode=0755
+
+# The engine config path defaults to ~/.config/ale-my-eyes/config.json; HOME is
+# set to the state directory so that `ale` does not need a real login home.
+Home=/var/lib/ale
+
+# Main binary is installed by scripts/install.sh; config template ships in
+# deploy/config/ale-server.toml. `install.sh --prefix ...` rewrites the path.
+ExecStart=/usr/lib/ale/ale-server --config /etc/ale/ale-server.toml
+
+Restart=on-failure
+RestartSec=5
+# Give in-flight requests/sessions time to drain before SIGKILL.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Optional file for secrets (API keys referenced by [egress] api_key_env) and
+# per-host environment overrides. Keep it root-owned, mode 0600; systemd reads
+# it before dropping privileges. See docs/DEPLOY.md.
+EnvironmentFile=-/etc/ale/ale-server.env
+Environment=RUST_LOG=info
+
+# --- sandboxing -------------------------------------------------------------
+# The service listens on unprivileged ports (8080, 37655) and needs no
+# capabilities. All writable state is confined to /var/lib/ale.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/ale
+
+# journald logging (stdout/stderr are captured by the journal; no log files).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ale-server
+
+[Install]
+WantedBy=multi-user.target

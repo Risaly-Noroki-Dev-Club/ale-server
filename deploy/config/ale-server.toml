@@ -1,0 +1,181 @@
+# =============================================================================
+# ale-server.toml - configuration template for the headless Ale, My Eyes!
+# backend service.
+#
+# Install to  /etc/ale/ale-server.toml  (system unit) or
+#             ~/.config/ale/ale-server.toml  (user unit / local development).
+# Validate with:
+#   /usr/lib/ale/ale-server --check-config --config /etc/ale/ale-server.toml
+#
+# Every value below is the compiled-in default unless noted. All sections are
+# optional: an empty file is a valid configuration, but set [egress] explicitly
+# before exposing the service on a network.
+#
+# Environment overrides
+# ---------------------
+# Any leaf value can be overridden without editing the file, using the
+# ALE_SERVER__ prefix followed by the section/key path with BOTH underscores
+# doubled per level:
+#
+#   ALE_SERVER__SERVER__BIND=127.0.0.1:8080
+#   ALE_SERVER__DEVICE__PAIRING__CODE_TTL_S=600
+#   ALE_SERVER__DEVICE__AUTOMATION__DRY_RUN=true
+#   ALE_SERVER__LOGGING__LEVEL=debug
+#
+# A single underscore is part of the key name (e.g. CODE_TTL_S above); a double
+# underscore separates nested keys. List values are comma-separated:
+#
+#   ALE_SERVER__SERVER__CORS_ORIGIN=https://a.example.lan,https://b.example.lan
+#   ALE_SERVER__EGRESS__ALLOWED_HOSTS=api.openai.com,api.example.com
+#
+# Environment overrides win over the file; `--check-config` shows validation
+# errors for both sources.
+#
+# Secrets (cloud API keys) belong in the environment, never in this file:
+# the system unit reads /etc/ale/ale-server.env (mode 0600) and [egress]
+# api_key_env names the variable to read.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# [server] - plain HTTP API used by tools, the GUI admin surface and health
+# checks. Routes: /health, /status, /models, /asr/*, /tts/*, /vlm/*.
+# -----------------------------------------------------------------------------
+[server]
+# Listen address. 0.0.0.0 makes the API reachable from the LAN; use 127.0.0.1
+# when a reverse proxy or SSH tunnel provides access.
+bind = "0.0.0.0:8080"
+# Optional CORS origin allow-list for browser-based admin tooling. Empty (the
+# default) disables the CORS layer entirely; "*" is rejected because the API is
+# never permissive by default.
+# cors_origin = ["https://admin.example.lan"]
+
+# -----------------------------------------------------------------------------
+# [engine] - the vendored ale-core inference engine (cloud ASR/TTS/VLM).
+# The engine is optional: if it cannot start, /health, /status and every device
+# (capture/automation/pairing) route keep working and inference routes return
+# HTTP 503 with error code ENGINE_UNAVAILABLE.
+# -----------------------------------------------------------------------------
+[engine]
+# Set to false to run deliberately without any model engine.
+enabled = true
+# Shared ale-core config written by the desktop GUI (providers, API URLs,
+# models). Default resolves to ~/.config/ale-my-eyes/config.json. With the
+# system unit HOME=/var/lib/ale, so the default is
+# /var/lib/ale/.config/ale-my-eyes/config.json - copy the file there or point
+# this key at an absolute path owned by the `ale` user.
+# config_path = "/var/lib/ale/.config/ale-my-eyes/config.json"
+# Credential backend used by the engine:
+#   auto   - probe the system keyring, fall back to a 0600 file (default);
+#   system - D-Bus Secret Service keyring (usually unavailable on headless hosts);
+#   file   - JSON file, default $STATE_DIRECTORY/secrets.json
+#            (/var/lib/ale/secrets.json for the system unit);
+#   env    - read-only ALE_SECRET__API_KEY / ALE_SECRET__BACKUP_API_KEY /
+#            ALE_SECRET__TRANSCRIPTION_API_KEY environment variables.
+secret_store = "auto"
+# secret_store_path = "/var/lib/ale/secrets.json"
+
+# -----------------------------------------------------------------------------
+# [device] - encrypted terminal channel (WebSocket + Noise), screen capture and
+# guarded desktop automation. All nested keys are matched exactly.
+# -----------------------------------------------------------------------------
+[device]
+# Enable the encrypted device listener. Disabling it leaves the HTTP API up.
+enabled = true
+# Bind address of the WebSocket device channel. Default port 37655.
+bind = "0.0.0.0:37655"
+
+# --- pairing -----------------------------------------------------------------
+[device.pairing]
+# Allow new pairing attempts. Existing paired terminals keep working when false
+# (set it to false in production once every terminal is paired).
+enabled = true
+# Lifetime of one pairing code in seconds (1..=3600). Short is safer: after
+# expiry a new code is generated and logged at INFO.
+code_ttl_s = 300
+# Failed Noise handshakes allowed per peer address before backing off (1..=100).
+max_attempts = 5
+# Lifetime of the HTTP egress bearer token issued in SessionReady (seconds).
+token_ttl_s = 86400
+
+# --- capture -----------------------------------------------------------------
+[device.capture]
+# Force a capture backend instead of auto-detecting. Linux: "grim" (Wayland),
+# "spectacle", "gnome-screenshot", "import" (ImageMagick), "scrot"; macOS dev:
+# "screencapture". Comment out to auto-detect in this order.
+# preferred_backend = "grim"
+# Screenshots are downscaled so their width never exceeds this value (320..=7680).
+max_width = 1600
+# JPEG quality for lossy screenshots (30..=100).
+jpeg_quality = 78
+# Hard timeout for one capture command (200..=60000 ms).
+timeout_ms = 5000
+# Reuse a frame younger than this for non-"now" capture requests; 0 disables
+# the cache and always captures fresh.
+cache_ttl_ms = 0
+
+# --- automation --------------------------------------------------------------
+[device.automation]
+# Force an automation backend: "xdotool" (X11), "ydotool" (Wayland/uinput),
+# "dotool" (Wayland/uinput), "wtype" (Wayland typing). Comment out to detect.
+# preferred_backend = "xdotool"
+# Allow high-risk actions (file system changes, closing applications).
+# Keep false unless the terminal is fully trusted.
+allow_high_risk = false
+# Allow opening applications and URLs (process-level actions).
+allow_process_actions = false
+# Log the action plans instead of executing them. Useful for a first pairing
+# to observe what the terminal asks for.
+dry_run = false
+# Hard timeout for one action plan (500..=300000 ms).
+timeout_ms = 30000
+# Maximum number of actions accepted in one plan (1..=20).
+max_actions = 20
+# Reject an action plan that references a screenshot older than this
+# (500..=120000 ms) - prevents replaying plans against a stale screen.
+frame_max_age_ms = 5000
+
+# --- limits ------------------------------------------------------------------
+[device.limits]
+# Concurrent device sessions (1..=32).
+max_connections = 4
+# In-flight requests per session (1..=16).
+max_concurrent_requests = 2
+# Largest accepted protocol message after decryption (64 KiB..=64 MiB).
+max_message_bytes = 8388608
+# Disconnect idle sessions after this many seconds (10..=3600).
+idle_timeout_s = 120
+# Timeout for one capture/automation request (5..=600 s).
+request_timeout_s = 90
+
+# -----------------------------------------------------------------------------
+# [egress] - allow-listed cloud model proxy used by paired terminals through
+# POST /v1/egress/{chat,vision,tts,asr} with the bearer token from SessionReady.
+# Credentials stay on this machine; the terminal never talks to the provider.
+# Leave disabled until you have reviewed allowed_hosts and the API key setup.
+# -----------------------------------------------------------------------------
+[egress]
+enabled = false
+# Exact upstream hostnames the proxy may contact (host only, no scheme/path).
+# Must be non-empty and must contain the upstream host when enabled.
+allowed_hosts = ["api.openai.com"]
+# Upstream base URL (OpenAI-compatible API root, WITHOUT the /v1/... path).
+upstream = "https://api.openai.com"
+# Name of the environment variable that holds the provider API key. The value
+# is read from the process environment (/etc/ale/ale-server.env for the system
+# unit) and is never logged.
+api_key_env = "OPENAI_API_KEY"
+# Timeout for one upstream request in seconds (1..=600).
+timeout_s = 60
+# Request/response body caps in bytes (1 KiB..=64 MiB / 1 KiB..=256 MiB).
+max_body_bytes = 1048576
+max_response_bytes = 16777216
+
+# -----------------------------------------------------------------------------
+# [logging] - tracing output. The systemd units send stderr to journald.
+# -----------------------------------------------------------------------------
+[logging]
+# Base level: trace, debug, info, warn, error. The RUST_LOG environment
+# variable (set by the unit) can add per-module overrides.
+level = "info"
+# "text" for journald/text logs, "json" for structured log shipping.
+format = "text"

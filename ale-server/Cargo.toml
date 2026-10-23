@@ -1,0 +1,40 @@
+[package]
+name = "ale-server"
+description = "Headless Ale, My Eyes! backend service: HTTP API, encrypted terminal channel and network egress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ale_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ale-server"
+path = "src/main.rs"
+
+[dependencies]
+ale-core = { path = "../ale-core" }
+ale-device = { path = "../ale-device" }
+anyhow.workspace = true
+axum = { version = "0.7", features = ["multipart"] }
+base64.workspace = true
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml = "0.8"
+tower-http = { version = "0.5", features = ["cors", "trace", "catch-panic"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
