@@ -40,14 +40,16 @@ arm64 and on x86_64 for development, with the architecture name adjusted.
 | Raspberry Pi OS Bookworm 64-bit | primary target | Pi 4 / Pi 5, CM4 |
 | Armbian (Bookworm/Noble based) arm64 | supported | Orange Pi, Rock Pi, Odroid, … |
 | Ubuntu 24.04 arm64 | supported | same package names |
-| Debian/Ubuntu x86_64 | development only | useful for the HTTP API; capture/automation are architecture-independent commands |
+| Debian/Ubuntu x86_64 | supported (native build) | `scripts/build-debian-x64.sh`; useful for the HTTP API; capture/automation are architecture-independent commands |
 
 Hardware notes:
 
 * Use a **64-bit OS** (`getconf LONG_BIT` must print `64`). 32-bit Raspberry Pi
   OS cannot run these binaries.
 * A Raspberry Pi 4 with 4 GB RAM is the practical minimum; 8 GB is comfortable
-  if local models are used through `ale-modeld`. The Pi 5 is noticeably faster.
+  if local models are used through `ale-modeld` (SenseVoice ASR needs the optional
+  sherpa runtime; Qwen2.5-VL/ShowUI need a llama.cpp runtime and GPU). The Pi 5 is
+  noticeably faster. Cloud-only deployments need no local model files.
 * Use an SSD or a fast A2 SD card: Rust release binaries and local model files
   are large and capture workloads create temporary files.
 * Screen capture and automation require a **live graphical session** on the
@@ -146,6 +148,11 @@ cd ale-server
 # optional sherpa/SenseVoice download (recommended on arm64)
 ./scripts/build-debian-arm.sh --with-modeld
 ```
+
+On a Debian/Ubuntu **x86_64** host use the native counterpart
+`./scripts/build-debian-x64.sh [--with-modeld] [--out DIR]` (same build
+dependencies, `--locked`, `--no-default-features` for `ale-modeld`); it does not
+cross-compile. `package-tarball.sh` remains arm64-only.
 
 The script:
 
@@ -329,8 +336,10 @@ Key sections (full comments are in the template):
 
 * `[server]`: HTTP bind (default `0.0.0.0:8080`) and an optional CORS origin
   allow-list (`cors_origin`, a TOML list; empty disables CORS, `*` is rejected).
-* `[engine]`: cloud ASR/TTS/VLM configuration, or `enabled = false` for a
-  pure capture/egress node. Engine startup failures never crash the service;
+* `[engine]`: remote cloud ASR/VLM configuration (TTS is served downstream by
+  `ale-server` itself, not by the vendored engine), or `enabled = false` for a
+  pure capture/egress node. `ale-core` contains no local inference; local models
+  run in `ale-modeld` only. Engine startup failures never crash the service;
   inference routes return HTTP 503 `ENGINE_UNAVAILABLE` while every other route
   keeps working. `secret_store` selects the credential backend: `auto`
   (keyring, falling back to a 0600 file), `system` (D-Bus Secret Service),
@@ -795,9 +804,12 @@ typo in a `[device]` key (unknown keys are rejected), invalid address in a
 `bind` key, a `pairing.code_ttl_s` outside `1..=3600`, or a config file not
 readable by the `ale` user.
 
-### HTTP 503 `ENGINE_UNAVAILABLE` on `/asr`, `/tts`, `/vlm`
+### HTTP 503 `ENGINE_UNAVAILABLE` on `/asr` and `/vlm`
 
 The device channel and health routes are fine; the cloud engine could not start.
+`/tts/synthesize` is implemented downstream by `ale-server` (the vendored
+`ale-core` has no TTS); its failures are reported separately in
+[docs/API.md](API.md), and it also needs a configured provider key.
 Check, in order:
 
 1. `[engine] enabled` is `true`;

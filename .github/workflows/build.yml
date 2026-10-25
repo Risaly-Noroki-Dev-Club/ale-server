@@ -52,6 +52,28 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+  upstream-sync:
+    name: upstream vendored sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read pinned upstream commit
+        id: upstream
+        run: echo "commit=$(tr -d '[:space:]' < UPSTREAM_COMMIT)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream desktop repository
+        uses: actions/checkout@v4
+        with:
+          repository: Risaly-Noroki-Dev-Club/ale-my-eyes-desktop
+          ref: ${{ steps.upstream.outputs.commit }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Verify vendored crates match the pinned upstream commit
+        run: bash scripts/verify-upstream-sync.sh upstream
+
   build-aarch64:
     name: build (aarch64-unknown-linux-gnu)
     runs-on: ubuntu-latest

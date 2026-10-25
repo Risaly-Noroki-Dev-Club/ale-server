@@ -1,25 +1,40 @@
-# ale-server — extraction contracts
+# ale-server — downstream contracts
 
-This repository is the **headless backend distribution** of Ale, My Eyes!. It is a
-Rust workspace that builds the computer-side service and the optional local model
-daemon. It must build and run on **Debian (aarch64/arm64)** with no GUI stack.
+This repository is the **headless backend distribution** of Ale, My Eyes! and a
+**downstream** of [`ale-my-eyes-desktop`](https://github.com/Risaly-Noroki-Dev-Club/ale-my-eyes-desktop):
+the two shared crates (`ale-core`, `ale-modeld`) are vendored from a pinned desktop
+commit and refreshed with `scripts/sync-upstream.sh`. The workspace also builds the
+computer-side service (`ale-server`) and the headless device library (`ale-device`).
 
-The desktop GUI (`ale-my-eyes-desktop`) is the *client / admin surface* and is not
-part of this workspace.
+The upstream desktop repository remains the **source of truth** for `ale-core`,
+`ale-modeld`, the Misaka-Network v4 desktop protocol, configuration and model
+semantics. This repository adds the headless server/device layers on top; it must
+build and run on Debian (aarch64/arm64 primary, x86_64 supported) with no GUI stack.
+
+The desktop GUI is the *client / admin surface* and is not part of this workspace.
 
 ## Workspace layout
 
 ```
+UPSTREAM_COMMIT         full sha of the vendored ale-my-eyes-desktop commit
 Cargo.toml              workspace manifest (members, shared deps, release profile)
-ale-core/               vendored from ale-my-eyes-desktop@8408dce (engine, actions,
-                        config, cloud, remote, model_ipc, ...)
+ale-core/               vendored from ale-my-eyes-desktop@43511cd: config, cloud
+                        model calls, remote protocol types, task harness, model IPC
 ale-modeld/             vendored model scheduler daemon (feature `sensevoice` opt-in)
-ale-device/             NEW headless device service library (no GUI deps)
-ale-server/             NEW service binary: HTTP API + encrypted terminal channel
-deploy/                 systemd units, config template, install script
-scripts/                build/package helpers (Debian arm64)
-docs/                   architecture, protocol, API and deployment docs
+ale-device/             headless device library: capture, automation, crypto,
+                        session, terminal protocol v1 (no GUI deps)
+ale-server/             service binary: HTTP API, device wiring, egress, CLI
+deploy/                 systemd units, config template, tmpfiles rules
+scripts/                build/package/install helpers + upstream sync scripts
+docs/                   architecture, contracts, protocol, API, deployment, upstream
 ```
+
+The vendored snapshot follows the desktop refactor that removed the dead local
+inference subsystem from `ale-core`: **no `local-inference`/`tts`/`cloud` Cargo
+features at all**, no ASR/VLM/LLM/TTS/VAD/memory modules, and `ale-core` only
+performs remote model calls. The task harness (`ale-core/src/harness/`) is included
+verbatim. Provenance, byte-identity verification and the sync procedure are
+documented in `docs/UPSTREAM.md`.
 
 Hard rules for every crate:
 
@@ -36,18 +51,38 @@ Hard rules for every crate:
 
 | Path | Owner |
 | --- | --- |
-| `ale-core/**`, `ale-modeld/**` | core teammate |
-| `ale-device/src/display.rs`, `ale-device/src/capture.rs`, `ale-device/tests/capture_*.rs` | capture teammate |
-| `ale-device/src/automation.rs`, `ale-device/tests/automation_*.rs` | automation teammate |
-| `ale-device/src/crypto.rs`, `ale-device/src/session.rs`, `ale-device/tests/session_*.rs` | session teammate |
-| `ale-server/**`, `ale-device/tests/egress_*.rs` | server teammate |
-| `deploy/**`, `scripts/**`, `.github/**`, `docs/DEPLOY.md`, `README.md` | packaging teammate |
-| `Cargo.toml` (root), `ale-device/Cargo.toml`, `ale-device/src/lib.rs`, `ale-device/src/config.rs`, `ale-device/src/error.rs`, `ale-device/src/protocol.rs`, `ale-device/src/audit.rs`, `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md` | Lead |
+| `ale-core/**`, `ale-modeld/**`, `UPSTREAM_COMMIT`, `docs/UPSTREAM.md`, `scripts/sync-upstream.sh`, `scripts/verify-upstream-sync.sh` | upstream-sync owner (vendored; only the sync procedure may refresh them) |
+| `ale-device/**` (except its root `Cargo.toml`/`lib.rs` contract files) | device owner |
+| `ale-server/**`, `ale-server/src/app.rs`, `ale-server/tests/egress_*.rs` | server/API owner |
+| `README.md`, `AGENTS.md`, `docs/{ARCHITECTURE,PROTOCOL,DEPLOY,API,CONTRACTS}.md`, `deploy/**`, `scripts/**` (except the two sync scripts), `.github/**` | downstream docs/packaging owner |
+| root `Cargo.toml`, `ale-device/Cargo.toml`, `ale-device/src/{lib,config,error,protocol,audit}.rs`, release/version decisions | Lead |
 
 If a contract needs to change, message the Lead instead of editing another
-owner's file.
+owner's file. Never edit a vendored file locally: fix the call site in
+`ale-device`/`ale-server`, or change it upstream and re-sync.
 
-## `ale-device` public API (frozen; fill in the `unimplemented!()` bodies)
+## Two protocols — do not confuse them
+
+This repository contains two unrelated wire protocols:
+
+1. **Vendored `ale_core::remote` — Misaka-Network v4.** This is the desktop
+   phone-facing protocol, vendored verbatim from upstream. Version `4`, pairing
+   QR scheme `misaka-network://`, mDNS `_misaka-network._tcp`, Noise PSK label
+   `misaka-network-remote-v4`, chunk magic `MSKN`, execution states including
+   `outcome_unknown`/`needs_user`. `ale-server` does not serve this protocol; the
+   desktop app does. Do not rename or reuse its labels here.
+2. **`ale-device` terminal protocol — version 1.** This repository's own
+   encrypted terminal channel (`ale-device/src/{crypto,session,protocol}.rs`,
+   served on port 37655 by default). It uses an 8-character Crockford-base32
+   pairing code, Noise PSK derivation with the label `ale-device-pairing-v1`, and
+   `AME2` chunk framing (`magic(4) | message_id(8 BE) | index(4 BE) | total(4 BE)
+   | payload`). **It is not wire-compatible with Misaka-Network v4** and does not
+   follow the upstream rename: Lead decision is to keep the terminal protocol at
+   v1 with `AME2`/`ale-device-pairing-v1` while the desktop protocol is v4/`MSKN`.
+   The two protocols may coexist in the product (desktop↔phone vs terminal↔server)
+   but never share a connection or a PSK label.
+
+## `ale-device` public API (frozen)
 
 * `config::{DeviceConfig, CaptureConfig, AutomationConfig, PairingConfig, LimitsConfig,
   DEFAULT_DEVICE_PORT}` — serde schema with `Default` + `validate()`.
@@ -65,18 +100,17 @@ owner's file.
   Guards listed in the module docs are mandatory.
 * `crypto::{SecureChannel, pairing_psk, psk_fingerprint, random_pairing_code,
   random_token, constant_time_eq}` — Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s with the
-  `AME2` chunking scheme from the desktop GUI.
+  terminal protocol's own `AME2` chunking (see above; not the desktop `MSKN`).
 * `protocol::{DeviceMessage, SessionInit, SessionReady, DeviceCapabilities,
   FrameMeta, ClientKind, ExecutionState, HealthStatus, DEVICE_PROTOCOL_VERSION}` —
   `#[serde(tag = "type", rename_all = "snake_case")]`.
 * `session::{SessionService, SessionDescriptor}` — `serve()` accepts until shutdown;
   `pairing_code()` / `rotate_pairing_code()`; `validate_token()` for the egress API.
 
-Noise framing details (must match `remote_crypto.rs` of the desktop repo):
+Terminal protocol framing details (implemented in `ale-device/src/crypto.rs`):
 
 * plaintext up to 48 KiB is one frame;
-* larger payloads are split into `AME2` chunks: `magic(4) | message_id(8 BE) |
-  index(4 BE) | total(4 BE) | payload`;
+* larger payloads are split into `AME2` chunks (20-byte header + payload);
 * receiver rejects out-of-order, oversized or interleaved messages;
 * handshake must complete within a small timeout, and failures are rate limited.
 
@@ -96,10 +130,19 @@ Session flow (WebSocket binary frames, port `37_655` by default):
 * binary name: `ale-server`; config path default `/etc/ale/ale-server.toml`,
   override with `--config`; env overrides use the `ALE_SERVER__` prefix
   (e.g. `ALE_SERVER__HTTP__BIND`).
-* HTTP listener: default `0.0.0.0:8080`; routes kept from the original repo:
+* HTTP listener: default `0.0.0.0:8080`; routes:
   `GET /health`, `GET /status`, `GET /models`, `POST /asr/transcribe`,
   `POST /tts/synthesize`, `POST /vlm/describe`, `POST /vlm/ask`.
-* device channel: enabled by `[device]`, binds `device.bind`.
+* Inference ownership: `/asr`, `/vlm/describe`, `/vlm/ask` use the vendored cloud
+  engine (`AleEngine` → `RemoteCloudApi`). **TTS is not in the vendored core**: the
+  server implements `/tts/synthesize` (and `POST /v1/egress/tts`) downstream using
+  the configured cloud provider; an unsupported provider/wire protocol returns a
+  clear client error instead of a fake success.
+* `GET /models` is assembled downstream from configuration: configured cloud
+  model identifiers plus the local model names known to the model scheduler
+  (local entries are marked as such). It never claims a model is downloaded or
+  ready when the engine cannot confirm it.
+* device channel: enabled by `[device]`, binds `device.bind` (terminal protocol v1).
 * egress proxy: `POST /v1/egress/chat`, `POST /v1/egress/vision`,
   `POST /v1/egress/tts`, `POST /v1/egress/asr` with
   `Authorization: Bearer <token from SessionReady>`; only allow-listed upstream
@@ -110,29 +153,44 @@ Session flow (WebSocket binary frames, port `37_655` by default):
   `--check-config` validates and exits.
 * never panic on malformed HTTP; return JSON `{ "error": { "code", "message" } }`.
 
+## Upstream sync contract
+
+* pinned sha lives in `UPSTREAM_COMMIT`; `docs/UPSTREAM.md` records provenance,
+  deliberate local changes (currently none) and verification results.
+* refresh: `./scripts/sync-upstream.sh <desktop-checkout> [sha]` (refuses a dirty
+  upstream working tree, replaces `ale-core/`+`ale-modeld/`, prints a checklist).
+* verify: `./scripts/verify-upstream-sync.sh <desktop-checkout>` compares both
+  trees byte-for-byte with the pinned commit; CI job `upstream-sync` checks out the
+  pinned upstream sha and runs the same script.
+* never vendor working-tree state, never patch vendored files locally; adapt
+  `ale-device`/`ale-server` call sites, or change upstream and bump the pin.
+
 ## Packaging contract
 
 * `deploy/systemd/ale-server.service` (system) and
   `deploy/systemd/ale-server-user.service` (user session; needed for capture).
 * config template `deploy/config/ale-server.toml`, docs `docs/DEPLOY.md`.
-* `scripts/build-debian-arm.sh` builds on-device (native `cargo build --release`),
-  `scripts/package-tarball.sh` creates `dist/ale-server-<version>-linux-aarch64.tar.gz`
-  with binaries, config and units; `scripts/install.sh` installs on Debian.
-* CI: `.github/workflows/build.yml` runs `cargo test --workspace` on x86_64 and
-  cross-builds `aarch64-unknown-linux-gnu` (release binaries as artifacts).
+* `scripts/build-debian-arm.sh` builds natively on arm64 (primary release target);
+  `scripts/build-debian-x64.sh` builds natively on x86_64 for Linux x64 hosts.
+  Both build `ale-server` with `--locked` and the optional `ale-modeld` with
+  `--no-default-features` (the sherpa/SenseVoice runtime is not downloaded).
+* `scripts/package-tarball.sh` creates
+  `dist/ale-server-<version>-linux-aarch64.tar.gz` with binaries, config, units,
+  `install.sh`, docs/provenance files and `SHA256SUMS`; it is arm64-only by design.
+* `scripts/install.sh` installs on Debian (system `--system` or `--user`).
+* CI: `.github/workflows/build.yml` jobs `test` (x86_64), `upstream-sync`
+  (pinned vendored check) and `build-aarch64` (cross-built release artifact).
 * system paths: `/usr/lib/ale/`, `/etc/ale/`, `/var/lib/ale/`, log to journald.
 
 ## Verification
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace
-cargo test --workspace
+cargo check --workspace --locked
+cargo test --workspace --locked
 cargo clippy --workspace --all-targets -- -D warnings   # optional, fix when cheap
+bash scripts/verify-upstream-sync.sh /path/to/ale-my-eyes-desktop
 ```
-
-`ale-core`/`ale-modeld` are vendored from `ale-my-eyes-desktop` commit
-`8408dce`, which is also the protocol/behaviour reference for desktop parity.
 
 ## Implementation decisions (final)
 
@@ -164,6 +222,10 @@ These were settled during implementation and are covered by tests:
   with `[engine].secret_store = auto|system|file|env`. `auto` probes the keyring
   (10 s cap) and falls back to a `0600` JSON file (`STATE_DIRECTORY/secrets.json`),
   so a Debian host without D-Bus Secret Service still starts.
+* **TTS ownership** — the vendored `ale-core` no longer provides TTS or local
+  inference; `/tts/synthesize` and `POST /v1/egress/tts` are implemented by this
+  repository's server layer against a configured cloud endpoint. Local inference
+  remains exclusively in `ale-modeld`.
 * **Security fix (integration)** — the device WS handshake frame is capped at
   49 168 B and the handshake must finish within 10 s; unknown/expired pairing
   codes close the socket with a stable reason instead of falling into the request

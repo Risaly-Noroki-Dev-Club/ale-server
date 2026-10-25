@@ -7,9 +7,20 @@ dedicated hardware, CLI) and the headless computer service (`ale-device`). It
 covers the transport, the pairing flow, the Noise handshake, `AME2` framing, the
 message catalog, limits, error codes and the threat model.
 
-The implementation lives in `ale-device/src/{crypto,session,protocol}.rs`; the
-desktop phone-facing protocol (`ale-core::remote`) is a **different** protocol and
-is not wire-compatible with this one.
+The implementation lives in `ale-device/src/{crypto,session,protocol}.rs`.
+
+### Relationship to Misaka-Network v4 (desktop)
+
+The product contains a second, unrelated protocol: the vendored
+`ale-core::remote` **Misaka-Network v4** used between the desktop app and the
+phone app (`misaka-network://` pairing scheme, `_misaka-network._tcp` mDNS, PSK
+label `misaka-network-remote-v4`, chunk magic `MSKN`, execution states
+`outcome_unknown`/`needs_user`). This repository's terminal protocol is the
+**v1** protocol described in this document: it keeps its own 8-character
+Crockford pairing code, `ale-device-pairing-v1` PSK label and `AME2` chunk
+magic, and is **not wire-compatible** with Misaka-Network v4. Lead decision:
+the terminal protocol does not follow the upstream v4 rename; never mix the
+two labels, keys or framing schemes in one connection.
 
 ## 1. Transport
 
@@ -415,6 +426,10 @@ preserved for chunking failures whose detail starts with that token.
 
 * `DEVICE_PROTOCOL_VERSION` (currently `1`) is bumped for any incompatible change
   to the message catalog or framing.
+* This version number is **independent** from the desktop Misaka-Network version
+  (currently v4). They are separate protocols and can advance independently; do
+  not rename this protocol's `AME2`/`ale-device-pairing-v1` identifiers to match
+  the desktop v4 names.
 * Terminals must send their version in `SessionInit`. A mismatch produces
   `SessionRejected { code: "PROTOCOL_INCOMPATIBLE" }` plus a
   `protocol_incompatible` close; the terminal should upgrade or show an error.

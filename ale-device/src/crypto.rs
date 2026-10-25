@@ -2,7 +2,10 @@
 //!
 //! Owner: session teammate. Ported from the desktop GUI's `remote_crypto.rs`
 //! (Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s, `AME2` chunking) and adapted for the
-//! terminal protocol.
+//! terminal protocol. Note that the vendored upstream `ale_core::remote` is now
+//! Misaka-Network v4 and uses `MSKN` chunk framing; this terminal protocol keeps
+//! `AME2` and is intentionally not wire-compatible with it (see
+//! `docs/PROTOCOL.md`).
 //!
 //! Pairing model:
 //! * the service prints an 8-character base32 pairing code (`pairing::code()`);

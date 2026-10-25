@@ -39,6 +39,8 @@
 # -----------------------------------------------------------------------------
 # [server] - plain HTTP API used by tools, the GUI admin surface and health
 # checks. Routes: /health, /status, /models, /asr/*, /tts/*, /vlm/*.
+# TTS is implemented by ale-server itself (the vendored ale-core has no TTS);
+# /asr and /vlm use the configured cloud engine.
 # -----------------------------------------------------------------------------
 [server]
 # Listen address. 0.0.0.0 makes the API reachable from the LAN; use 127.0.0.1
@@ -50,7 +52,9 @@ bind = "0.0.0.0:8080"
 # cors_origin = ["https://admin.example.lan"]
 
 # -----------------------------------------------------------------------------
-# [engine] - the vendored ale-core inference engine (cloud ASR/TTS/VLM).
+# [engine] - the vendored ale-core cloud engine (remote ASR/VLM; TTS is served
+# downstream by ale-server itself). ale-core contains no local inference: local
+# models, when used, run in the separate ale-modeld process.
 # The engine is optional: if it cannot start, /health, /status and every device
 # (capture/automation/pairing) route keep working and inference routes return
 # HTTP 503 with error code ENGINE_UNAVAILABLE.

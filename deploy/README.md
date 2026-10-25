@@ -1,7 +1,8 @@
 # deploy/
 
 Deployment assets for the headless `ale-server` backend on Debian-family
-arm64 systems (Debian 12, Raspberry Pi OS Bookworm, Armbian). The full guide is
+systems (arm64 primary: Debian 12, Raspberry Pi OS Bookworm, Armbian; x86_64
+supported for local/server builds). The full guide is
 [docs/DEPLOY.md](../docs/DEPLOY.md); this file is the quick map.
 
 ## Layout
@@ -37,13 +38,21 @@ Do not run both units against the same ports on one host.
 # Native arm64 build (on the device)
 ./scripts/build-debian-arm.sh --with-modeld
 
+# Native x86_64 build (Debian/Ubuntu Linux x64 host)
+./scripts/build-debian-x64.sh --with-modeld
+
 # Release tarball: dist/ale-server-<version>-linux-aarch64.tar.gz
+# (package-tarball.sh is arm64-only; keep x64 binaries separate)
 ./scripts/package-tarball.sh
 
 # Install from an unpacked tarball
 sudo ./install.sh --system
 ./install.sh --user
 ```
+
+The vendored `ale-core`/`ale-modeld` provenance is pinned in `UPSTREAM_COMMIT`
+and documented in [docs/UPSTREAM.md](../docs/UPSTREAM.md); refresh it with
+`scripts/sync-upstream.sh` and verify with `scripts/verify-upstream-sync.sh`.
 
 Keep the configuration template in sync with the serde schema in
 `ale-device/src/config.rs` and `ale-server/` whenever keys are added.

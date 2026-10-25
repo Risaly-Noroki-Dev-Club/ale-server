@@ -19,6 +19,8 @@
 #
 # Cross-compiling from x86_64? See docs/DEPLOY.md (cargo-zigbuild / cross) and
 # let CI produce the release tarball instead.
+#
+# Native x86_64 Linux host? Use scripts/build-debian-x64.sh instead.
 
 set -euo pipefail
 

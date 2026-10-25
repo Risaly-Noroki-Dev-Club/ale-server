@@ -2,7 +2,9 @@
 
 Headless service binary for **Ale, My Eyes!**. It exposes:
 
-* the inference API (`/health`, `/status`, `/models`, `/asr`, `/tts`, `/vlm`);
+* the model/status API (`/health`, `/status`, `/models`, `/asr`, `/vlm`);
+* a downstream TTS backend (`/tts/synthesize`) implemented by `ale-server`
+  itself, because the vendored `ale-core` no longer provides TTS;
 * a loopback-only admin endpoint for the encrypted device channel
   (`/v1/device/status`);
 * an allow-listed, size-capped AI egress proxy (`/v1/egress/*`) authenticated
@@ -40,6 +42,7 @@ change. Error codes are stable:
 | --- | --- | --- |
 | `ENGINE_UNAVAILABLE` | 503 | `[engine].enabled = false`, or lazy initialization failed/timed out. Inference routes only. |
 | `INFERENCE_FAILED` | 502 | Engine reached but the inference/cloud call failed. |
+| `UNSUPPORTED_WIRE_API` | 501 | `/tts/synthesize` requires an OpenAI-compatible endpoint, but the configured cloud `wire_api` is not `openai_chat_completions`. |
 | `UNAUTHORIZED` | 401 | Missing/invalid `Authorization: Bearer` token (egress). |
 | `FORBIDDEN` | 403 | Non-loopback `/v1/device/status`. |
 | `NOT_FOUND` | 404 | Unknown route. |
@@ -176,28 +179,66 @@ The engine is created **lazily** on the first inference request, inside a
 the process. Failed initializations are retried at most once every 30 s; a single
 initialization attempt is bounded by a 120 s timeout.
 
+The vendored `ale-core` engine is **remote-only**: it performs cloud chat,
+vision and ASR calls, but it ships no local inference, TTS or model registry.
+`/asr` uses the independent **transcription endpoint** from the ale-core
+configuration, `/vlm/*` uses the primary `cloud_api` endpoint, and
+`/tts/synthesize` is implemented by `ale-server` itself (see below). Local models
+run in the optional `ale-modeld` daemon and are not reachable through these
+routes.
+
 If an inference call itself fails after the engine is up, the route returns
 `502 INFERENCE_FAILED` (error text truncated).
 
 ### `GET /models`
 
-Returns the model catalogue of the inference engine.
+Returns a **configuration view** of the models this host can use; the engine no
+longer keeps a downloaded-model registry. `503 ENGINE_UNAVAILABLE` when the
+engine is disabled or cannot be initialized.
 
 ```json
 {
   "models": [
     {
-      "id": "whisper-small",
-      "name": "Whisper Small",
-      "description": "Multilingual speech recognition",
-      "size_bytes": 484000000,
-      "purpose": "asr",
+      "id": "gpt-4o",
+      "name": "gpt-4o",
+      "description": "Cloud chat/vision model (provider `openai`, wire_api `openai_chat_completions`, base URL `https://api.openai.com/v1`)",
+      "size_bytes": null,
+      "purpose": "chat",
       "quantization": null,
-      "recommended_for": "medium"
+      "recommended_for": null,
+      "source": "cloud"
+    },
+    {
+      "id": "Qwen2.5-VL-3B-Instruct",
+      "name": "Qwen2.5-VL-3B-Instruct",
+      "description": "Local vision-language planning model served by ale-modeld (GPU-only)",
+      "size_bytes": null,
+      "purpose": "planning",
+      "quantization": null,
+      "recommended_for": null,
+      "source": "local-modeld"
     }
   ]
 }
 ```
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `name` | Model identifier from the ale-core configuration. |
+| `description` | Human-readable origin (cloud endpoint or `ale-modeld` role). |
+| `size_bytes` | Always `null`; the server does not track downloaded file sizes. |
+| `purpose` | `chat`, `asr`, `planning` or `grounding`. |
+| `source` | `cloud` (primary `cloud_api` or transcription endpoint) or `local-modeld`. |
+| `quantization`, `recommended_for` | Kept for response compatibility; always `null`. |
+
+Cloud entries appear when the corresponding key is configured: the primary model
+when `cloud_api.api_key` is set, and the transcription model when
+`transcription.enabled` and its endpoint key is set. `ale-modeld` entries
+(`model_scheduler.qwen_model`, `qwen_large_model`, `grounding_model`) appear only
+while `model_scheduler.enabled = true`. Duplicate identifiers are de-duplicated
+case-insensitively (cloud entries win). Model files may still be missing on disk
+— this route reports configuration, not readiness.
 
 Errors: `503 ENGINE_UNAVAILABLE`.
 
@@ -208,7 +249,7 @@ Transcribe audio. Multipart form data.
 | Form field | Required | Notes |
 | --- | --- | --- |
 | `audio` (or `file`) | yes | raw audio bytes (WAV/FLAC/etc. per engine) |
-| `language` | no | accepted, engine-side config decides today |
+| `language` | no | accepted for compatibility; the transcription endpoint decides the language today |
 | `format` | no | accepted for compatibility |
 
 Body limit: **32 MiB** (`413 PAYLOAD_TOO_LARGE` beyond that).
@@ -222,20 +263,27 @@ curl -s -X POST http://127.0.0.1:8080/asr/transcribe \
 { "text": "hello world" }
 ```
 
+Transcription uses the independent endpoint from the ale-core configuration
+(`transcription.enabled` plus its own base URL/key/model); without it the route
+returns `502 INFERENCE_FAILED`.
+
 Errors: `400 INVALID_REQUEST` (missing `audio`), `400 INVALID_MULTIPART`,
 `413 PAYLOAD_TOO_LARGE`, `502 INFERENCE_FAILED`, `503 ENGINE_UNAVAILABLE`.
 
 ### `POST /tts/synthesize`
 
-Synthesize speech from text. JSON body, limit **1 MiB**; `text` is capped at
-**4096 characters**.
+Synthesize speech from text through the configured cloud endpoint. JSON body,
+limit **1 MiB**; `text` is capped at **4096 characters**.
 
 ```json
 { "text": "hello world", "voice": "alloy", "speed": 1.0 }
 ```
 
-`voice`/`speed` are accepted for client compatibility; the engine configuration
-selects the actual voice today.
+`voice`/`speed` are accepted for client compatibility but **ignored**: the
+downstream request is pinned to OpenAI-compatible `tts-1`/`alloy`/`wav`. It is
+sent to `{cloud_api.api_url}/audio/speech` with the Bearer key from the ale-core
+credential store (`cloud_api.api_key`), so the host must have a configured cloud
+key. The configured `cloud_api.timeout` bounds the upstream call.
 
 ```json
 {
@@ -246,9 +294,14 @@ selects the actual voice today.
 ```
 
 `format` is sniffed from the audio bytes: `wav`, `mp3`, `ogg`, `flac` or `bin`.
+An upstream audio response larger than 32 MiB is rejected to avoid unbounded
+buffering.
 
 Errors: `400 INVALID_REQUEST` (empty/too long text), `400 INVALID_JSON`,
-`413 PAYLOAD_TOO_LARGE`, `502 INFERENCE_FAILED`, `503 ENGINE_UNAVAILABLE`.
+`413 PAYLOAD_TOO_LARGE`, `501 UNSUPPORTED_WIRE_API` (configured `wire_api` is not
+`openai_chat_completions`), `502 INFERENCE_FAILED` (missing cloud key, upstream
+timeout/connection/HTTP error), `503 ENGINE_UNAVAILABLE` (engine disabled or
+initialization failed).
 
 ### `POST /vlm/describe`
 
@@ -287,6 +340,10 @@ Body limit: **16 MiB**. The response mirrors `ale-core`'s vision response:
   "model": "gpt-4o-mini"
 }
 ```
+
+The route always asks the cloud vision model and supplies no tools, so
+`tool_calls` is `null`; `tokens_used` and `model` come from the provider
+response.
 
 Errors: `400 INVALID_REQUEST`, `400 INVALID_MULTIPART`, `413 PAYLOAD_TOO_LARGE`,
 `502 INFERENCE_FAILED`, `503 ENGINE_UNAVAILABLE`.
@@ -496,6 +553,11 @@ level = "info"                 # tracing filter, e.g. "ale_server=debug,tower_ht
 format = "text"                # text | json
 ```
 
+`[engine].config_path` points at the vendored `ale-core` JSON configuration:
+`cloud_api` there drives `/vlm/*` and `/tts/synthesize`, while `transcription`
+drives `/asr/transcribe` and `model_scheduler` feeds the local entries of
+`/models`.
+
 `[device]` is the frozen `ale_device::DeviceConfig` schema (see
 `docs/CONTRACTS.md` / `deploy/config/ale-server.toml`). Validation is strict:
 unknown fields, invalid addresses, wildcard CORS origins, duplicate HTTP/device
@@ -583,7 +645,7 @@ Options:
 | Route | Request cap | Other limits |
 | --- | --- | --- |
 | `/asr/transcribe` | 32 MiB multipart, 32 MiB audio field | engine 120 s init timeout; retry cooldown 30 s |
-| `/tts/synthesize` | 1 MiB JSON | 4096 characters |
+| `/tts/synthesize` | 1 MiB JSON | 4096 characters; upstream audio response ≤ 32 MiB; upstream timeout from ale-core `cloud_api.timeout` (1-80 s) |
 | `/vlm/describe` | 16 MiB multipart | — |
 | `/vlm/ask` | 16 MiB multipart | — |
 | `/v1/egress/*` | `[egress].max_body_bytes` (default 1 MiB) | `[egress].max_response_bytes` (default 16 MiB), `[egress].timeout_s` (default 60 s) |
@@ -591,4 +653,4 @@ Options:
 
 The inference multipart/JSON caps are compile-time constants in
 `ale-server/src/app.rs` (`MAX_AUDIO_BODY_BYTES`, `MAX_IMAGE_BODY_BYTES`,
-`MAX_JSON_BODY_BYTES`).
+`MAX_JSON_BODY_BYTES`, `MAX_TTS_AUDIO_BYTES`).

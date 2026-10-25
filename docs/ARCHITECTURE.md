@@ -4,28 +4,31 @@ Ale, My Eyes! is split into four deployable pieces:
 
 | Piece | Repo | Role |
 | --- | --- | --- |
-| Desktop GUI | `ale-my-eyes-desktop` | Slint app, local models, pairing QR, phone chat |
+| Desktop GUI | `ale-my-eyes-desktop` | Slint app, admin surface, phone protocol v4 (Misaka-Network), optional local model daemon on the desktop |
 | Mobile client | `ale-my-eyes-mobile` | Android companion: voice, camera, remote control |
-| **Backend service** | **this repo** | Headless computer-side service: HTTP API, encrypted device channel, optional model daemon |
-| Terminal (planned) | — | Dedicated hardware: screen, continuous voice, on-device Whisper/ShowUI |
+| **Backend service** | **this repo** | Headless computer-side service: HTTP API, encrypted terminal channel, optional model daemon. A **downstream** of the desktop repository |
+| Terminal (planned) | — | Dedicated hardware: screen, continuous voice, terminal protocol v1 client |
 
-This repository is the *headless backend bundle*. It contains no GUI code and can run
-as a systemd service on Debian arm64.
+This repository is the *headless backend bundle*. It contains no GUI code and runs
+as a systemd service on Debian arm64 (x86_64 supported for local builds). Its
+`ale-core/` and `ale-modeld/` are vendored from a pinned `ale-my-eyes-desktop`
+commit (`UPSTREAM_COMMIT`, see `docs/UPSTREAM.md`); changes to shared core
+behaviour are made upstream and re-synced, not patched here.
 
 ## Topology
 
 ```
-             phone / dedicated terminal (control side)
+             terminal / control client (terminal protocol v1)
                  │  WebSocket + Noise (paired, encrypted)
                  │  screenshot ⇄ action plan ⇄ health
                  ▼
 ┌──────────────────────── ale-server ────────────────────────┐
 │  HTTP API (0.0.0.0:8080)        device channel (0.0.0.0:37655) │
 │  /health /status /models        SessionService                   │
-│  /asr /tts /vlm (cloud engine)   ├─ CaptureService  (grim/xdotool-free, command backends) │
-│  /v1/device/status (loopback)    ├─ AutomationService (xdotool/ydotool, guarded)          │
-│  /v1/egress/* (Bearer token)     ├─ AuditLog        (bounded, redacted)                   │
-│                                  └─ pairing + Noise + rate limits                         │
+│  /asr /vlm (cloud engine)      ├─ CaptureService  (grim/xdotool-free, command backends) │
+│  /tts (downstream TTS backend) ├─ AutomationService (xdotool/ydotool, guarded)          │
+│  /v1/device/status (loopback)  ├─ AuditLog        (bounded, redacted)                   │
+│  /v1/egress/* (Bearer token)   └─ pairing + Noise + rate limits                         │
 └──────────────────────────────────────────────────────────────┘
                                  │
         egress proxy (allow-listed hosts, API key from env)
@@ -34,8 +37,23 @@ as a systemd service on Debian arm64.
 ```
 
 The optional `ale-modeld` binary remains available for on-computer local models
-(Whisper via sherpa/SenseVoice, local TTS), speaking the same `ale_core::model_ipc`
-contract as the desktop app.
+(SenseVoice ASR via sherpa-onnx, Qwen2.5-VL/ShowUI via a GPU-only llama.cpp
+worker), speaking the same `ale_core::model_ipc` contract as the desktop app.
+The vendored `ale-core` itself contains **no local inference and no TTS**: it only
+performs remote cloud calls, holds configuration/protocol types and the task
+harness. TTS for `/tts/synthesize` is implemented in this repository's server layer.
+
+## Two protocols, deliberately separate
+
+* **Desktop phone-facing protocol** — Misaka-Network **v4** (vendored
+  `ale-core::remote`): `misaka-network://` QR scheme, `_misaka-network._tcp`
+  mDNS, PSK label `misaka-network-remote-v4`, chunk magic `MSKN`. Served by the
+  desktop app, not by `ale-server`.
+* **Terminal protocol** — `ale-device`'s own **v1**: 8-character Crockford pairing
+  code, PSK label `ale-device-pairing-v1`, `AME2` chunk framing. Served by
+  `ale-server` on the device channel. It is **not wire-compatible** with
+  Misaka-Network v4 and intentionally keeps its own names (Lead decision).
+  See `docs/PROTOCOL.md`.
 
 ## Why the split
 
@@ -62,14 +80,18 @@ rejected with `STALE_FRAME`.
 
 ## Component summary
 
-* `ale-core` — vendored engine/protocol/config crate shared with the desktop app
-  (cloud ASR/TTS/VLM, `Action`/`ActionPlan`, model management, memory).
-* `ale-device` — the new headless device library: display discovery, command-based
+* `ale-core` (vendored, pinned `43511cd`) — configuration, remote cloud model calls
+  (`RemoteCloudApi` for the four wire protocols), `Action`/`ActionPlan`, model IPC
+  and scheduler types, the Misaka-Network v4 protocol types, and the task harness.
+  No local inference, no TTS, no model management/memory subsystem.
+* `ale-device` — the headless device library: display discovery, command-based
   screenshot capture, guarded automation executor, Noise secure channel, session
-  server, audit log, wire protocol.
-* `ale-server` — the binary: configuration, HTTP API, device channel wiring, egress
-  proxy, CLI (`--check-config`, `--print-pairing`), graceful shutdown.
-* `ale-modeld` — optional local model scheduler daemon (feature `sensevoice`).
+  server, audit log, terminal protocol v1.
+* `ale-server` — the binary: configuration, HTTP API (including the downstream TTS
+  backend), device channel wiring, egress proxy, CLI (`--check-config`,
+  `--print-pairing`), graceful shutdown.
+* `ale-modeld` (vendored) — optional local model scheduler daemon (feature
+  `sensevoice`; Debian packages build it with `--no-default-features`).
 
 ## Non-goals (for now)
 
@@ -85,4 +107,5 @@ rejected with `STALE_FRAME`.
 * terminal client reference implementation (Noise initiator + JPEG screenshot + plan);
 * authenticated pairing confirmation on the terminal screen;
 * multi-display aware action validation (already in `CaptureService` metadata);
-* optional ONNX/Whisper runtime via `ale-modeld` on ARM boards.
+* optional local ASR/VLM runtime via `ale-modeld` on ARM boards, packaged
+  deliberately with the sherpa/llama.cpp runtimes.

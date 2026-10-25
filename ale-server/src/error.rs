@@ -21,6 +21,9 @@ use serde_json::json;
 pub const ENGINE_UNAVAILABLE: &str = "ENGINE_UNAVAILABLE";
 /// The engine was reached but the inference call failed.
 pub const INFERENCE_FAILED: &str = "INFERENCE_FAILED";
+/// The configured cloud `wire_api` has no adapter for the requested operation
+/// (currently only `/tts/synthesize`, which requires OpenAI Chat Completions).
+pub const UNSUPPORTED_WIRE_API: &str = "UNSUPPORTED_WIRE_API";
 /// The request is missing a Bearer token.
 pub const UNAUTHORIZED: &str = "UNAUTHORIZED";
 /// The caller is not allowed to use this route (non-loopback admin or CORS).

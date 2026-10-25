@@ -13,6 +13,8 @@
 #   systemd/ale-server-user.service  user-session unit (capture/automation)
 #   tmpfiles/ale-server.conf      systemd-tmpfiles rules
 #   docs/DEPLOY.md                full deployment guide
+#   docs/UPSTREAM.md              vendored ale-core/ale-modeld provenance
+#   UPSTREAM_COMMIT               pinned upstream commit (40-char sha)
 #   install.sh                    Debian installer/uninstaller
 #   README.md, VERSION, LICENSE
 #   SHA256SUMS                    checksums of every file above
@@ -67,7 +69,7 @@ warn() {
 }
 
 usage() {
-    sed -n '3,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 abs_path() {
@@ -163,6 +165,8 @@ PAYLOAD_FILES=(
     "README.md:README.md"
     "LICENSE:LICENSE"
     "docs/DEPLOY.md:docs/DEPLOY.md"
+    "docs/UPSTREAM.md:docs/UPSTREAM.md"
+    "UPSTREAM_COMMIT:UPSTREAM_COMMIT"
 )
 
 copy_payload() {
