@@ -80,7 +80,7 @@ rejected with `STALE_FRAME`.
 
 ## Component summary
 
-* `ale-core` (vendored, pinned `43511cd`) — configuration, remote cloud model calls
+* `ale-core` (vendored, pinned `23ef51d`) — configuration, remote cloud model calls
   (`RemoteCloudApi` for the four wire protocols), `Action`/`ActionPlan`, model IPC
   and scheduler types, the Misaka-Network v4 protocol types, and the task harness.
   No local inference, no TTS, no model management/memory subsystem.

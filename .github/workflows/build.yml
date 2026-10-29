@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
 
@@ -51,6 +51,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   upstream-sync:
     name: upstream vendored sync

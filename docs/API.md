@@ -24,7 +24,11 @@ The device channel itself is a separate WebSocket protocol documented in
 
 ### 1.1 Error envelope
 
-Every non-2xx response produced by the service is JSON:
+Every non-2xx response produced by the service is JSON, with two documented
+exceptions: axum's default `405` (empty body + `Allow` header, see §1.1 note
+below) and 3xx responses, which this server does not emit. Routes that accept a
+JSON body map extractor rejections (malformed JSON, unknown fields, oversized
+body) onto this envelope as `INVALID_JSON` / `PAYLOAD_TOO_LARGE`.
 
 ```json
 {
@@ -58,9 +62,16 @@ change. Error codes are stable:
 | `EGRESS_RESPONSE_TOO_LARGE` | 502 | Upstream response exceeded `[egress].max_response_bytes`. |
 | `INTERNAL_ERROR` | 500 | Caught panic / unexpected internal failure. |
 
-Method-not-allowed is axum's default `405` with an empty body and an `Allow`
-header; `/health` and `/status` are public, the inference routes are protected by
-network policy (bind address/firewall), not by application authentication.
+Method-not-allowed is the single envelope exception: axum answers `405` with an
+empty body and an `Allow` header. `/health` and `/status` are public, the
+inference routes are protected by network policy (bind address/firewall), not by
+application authentication.
+
+**Loopback-only routes are not a security boundary against local reverse
+proxies.** `/v1/device/status` (pairing code!) and `/v1/tasks/browser` only check
+the peer IP. A reverse proxy or SSH tunnel that terminates on `127.0.0.1`
+forwards remote clients that look like loopback peers. Never publish those
+routes through a proxy or tunnel; see docs/DEPLOY.md §Network and firewall.
 
 ### 1.2 Response headers
 
@@ -95,6 +106,7 @@ curl -s http://127.0.0.1:8080/health
   "version": "0.2.0",
   "engine_enabled": true,
   "engine_ready": false,
+  "engine_state": "not_initialized",
   "engine_error": null,
   "device_enabled": true,
   "device_ready": true,
@@ -108,6 +120,7 @@ curl -s http://127.0.0.1:8080/health
 | `version` | `ale-server` crate version. |
 | `engine_enabled` | `[engine].enabled`. |
 | `engine_ready` | Engine successfully initialized. |
+| `engine_state` | `disabled`, `not_initialized` (enabled but no inference request has initialized it yet), `ready`, or `failed`. `status` stays `ok` for `not_initialized`. |
 | `engine_error` | Last init error, truncated to 300 chars (`null` when none). |
 | `device_enabled` | `[device].enabled`. |
 | `device_ready` | Device WebSocket runtime is running. |
@@ -140,7 +153,7 @@ boolean `api_key_configured`).
       "pairing": { "enabled": true, "code_ttl_s": 300, "max_attempts": 5, "token_ttl_s": 86400 },
       "capture": { "preferred_backend": null, "max_width": 1600, "jpeg_quality": 78, "timeout_ms": 5000, "cache_ttl_ms": 0 },
       "automation": { "preferred_backend": null, "allow_high_risk": false, "allow_process_actions": false, "dry_run": false, "timeout_ms": 30000, "max_actions": 20, "frame_max_age_ms": 5000 },
-      "limits": { "max_connections": 4, "max_concurrent_requests": 2, "max_message_bytes": 8388608, "idle_timeout_s": 120, "request_timeout_s": 90 }
+      "limits": { "max_connections": 4, "max_connections_per_ip": 2, "max_concurrent_requests": 2, "max_message_bytes": 8388608, "idle_timeout_s": 120, "request_timeout_s": 90 }
     },
     "egress": {
       "enabled": false,
@@ -654,3 +667,7 @@ Options:
 The inference multipart/JSON caps are compile-time constants in
 `ale-server/src/app.rs` (`MAX_AUDIO_BODY_BYTES`, `MAX_IMAGE_BODY_BYTES`,
 `MAX_JSON_BODY_BYTES`, `MAX_TTS_AUDIO_BYTES`).
+
+## Optional server-owned browser task
+
+`POST /v1/tasks/browser` accepts a goal and starting URL and lets the server own browser navigation, model calls and Markdown output. Disabled by default and restricted to loopback with explicit cloud/read-only approval. See [BROWSER-TASKS.md](BROWSER-TASKS.md) for configuration, request/response, budgets and evidence limits.

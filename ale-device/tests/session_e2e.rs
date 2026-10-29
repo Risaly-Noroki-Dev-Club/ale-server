@@ -200,8 +200,13 @@ async fn full_session_health_capture_token_and_shutdown() {
             .any(|entry| entry.kind == AuditKind::Disconnected),
         "disconnect must be audited"
     );
-    // Egress tokens live for `pairing.token_ttl_s`, independent of the session.
-    assert!(harness.service.validate_token(&ready.token).is_some());
+    // Egress tokens are bound to the session: the token issued in
+    // `SessionReady` must be revoked as soon as the session ends, even though
+    // `pairing.token_ttl_s` is much longer (SRV-01).
+    assert!(
+        harness.service.validate_token(&ready.token).is_none(),
+        "token must be revoked when its session ends"
+    );
 }
 
 #[tokio::test]
@@ -436,4 +441,34 @@ async fn rate_limit_rejects_excess_requests() {
         "RATE_LIMITED",
     );
     assert_eq!(request_id.as_deref(), Some("health-over-limit"));
+}
+
+/// A token issued in `SessionReady` must stop working the moment the session
+/// it belongs to is gone, even though `pairing.token_ttl_s` is much longer.
+#[tokio::test]
+async fn egress_token_is_revoked_when_the_session_disconnects() {
+    let harness = start_service_with_fake_capture().await;
+    let code = harness.service.pairing_code();
+    let (connection, ready) = TestConnection::pair(harness.addr, &code).await;
+    assert!(
+        harness.service.validate_token(&ready.token).is_some(),
+        "token must validate while the session is alive"
+    );
+
+    drop(connection);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while harness.service.session_count() != 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        harness.service.session_count(),
+        0,
+        "disconnected session must be removed"
+    );
+    assert!(
+        harness.service.validate_token(&ready.token).is_none(),
+        "egress token must be revoked when its session ends"
+    );
+    assert!(harness.service.validate_token("not-a-real-token").is_none());
+    let _ = harness.shutdown.send(true);
 }

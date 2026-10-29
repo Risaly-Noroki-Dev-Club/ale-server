@@ -368,6 +368,7 @@ All bounds come from `DeviceConfig` (`ale-device/src/config.rs`):
 | Pairing back-off | fixed | 60 s |
 | Egress token lifetime | `pairing.token_ttl_s` | 86 400 s |
 | Concurrent sessions | `limits.max_connections` | 4 (max 32) |
+| Unauthenticated connections per IP | `limits.max_connections_per_ip` | 2 (max 32) |
 | Concurrent requests per service | `limits.max_concurrent_requests` | 2 (max 16) |
 | Reassembled message size | `limits.max_message_bytes` | 8 MiB (hard ceiling 8 MiB) |
 | Idle timeout (no frames) | `limits.idle_timeout_s` | 120 s |
@@ -384,6 +385,10 @@ Behaviour:
 
 * connections above `max_connections` are accepted and immediately dropped (the
   server does not upgrade them);
+* connections from one peer IP above `max_connections_per_ip` are accepted and
+  immediately dropped before the Noise handshake; this stops a single peer from
+  occupying every session slot with unauthenticated sockets (the handshake phase
+  is bounded by a 10 s timeout);
 * requests above `max_concurrent_requests` in flight are rejected with
   `RATE_LIMITED` (the terminal should retry after the previous response);
 * the per-session request budget (30/min) returns `RATE_LIMITED` for excess
@@ -391,6 +396,9 @@ Behaviour:
 * an in-flight request that exceeds `request_timeout_s` gets
   `Error { code: "REQUEST_TIMEOUT" }` and its `ExecutionControl` is cancelled;
 * a session with no frames for `idle_timeout_s` is closed (`Away` close code);
+* egress tokens are bound to a session: when the session ends (peer close, idle
+  timeout, protocol violation, server shutdown) every token issued to it is
+  revoked immediately, independent of `pairing.token_ttl_s`;
 * protocol violations (unexpected message, bad chunking, decrypt failure,
   duplicate request id) produce an `Error` and close the session; three
   unexpected messages in a row also close it.

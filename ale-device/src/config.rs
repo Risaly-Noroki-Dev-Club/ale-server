@@ -201,6 +201,9 @@ impl AutomationConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct LimitsConfig {
     pub max_connections: usize,
+    /// Unauthenticated (pre-Noise) connections accepted per peer IP. Bounds the
+    /// handshake-phase connection exhaustion attack (SRV-05).
+    pub max_connections_per_ip: usize,
     pub max_concurrent_requests: usize,
     /// Largest accepted single protocol message after decryption.
     pub max_message_bytes: usize,
@@ -212,6 +215,7 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_connections: 4,
+            max_connections_per_ip: 2,
             max_concurrent_requests: 2,
             max_message_bytes: 8 * 1024 * 1024,
             idle_timeout_s: 120,
@@ -225,6 +229,11 @@ impl LimitsConfig {
         if !(1..=32).contains(&self.max_connections) {
             return Err(DeviceError::Config(
                 "limits.max_connections must be within 1..=32".into(),
+            ));
+        }
+        if !(1..=32).contains(&self.max_connections_per_ip) {
+            return Err(DeviceError::Config(
+                "limits.max_connections_per_ip must be within 1..=32".into(),
             ));
         }
         if !(1..=16).contains(&self.max_concurrent_requests) {

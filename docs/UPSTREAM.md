@@ -21,7 +21,7 @@ and how to refresh the snapshot.
 | --- | --- |
 | Repository | `ale-my-eyes-desktop` (`git@github.com:Risaly-Noroki-Dev-Club/ale-my-eyes-desktop.git`, https://github.com/Risaly-Noroki-Dev-Club/ale-my-eyes-desktop) |
 | Branch | `refactor/misaka-network-v4` |
-| Commit | `43511cd9224f29cf323e329b3abd0ffc6ba3e22a` (short: `43511cd`) |
+| Commit | `23ef51d6e7113066bd6ae910feb4954ee8c34ab5` (short: `23ef51d`) |
 | Commit subject | `Refactor desktop: drop dead local inference, honest provider mapping, verified tasks, Misaka-Network v4` |
 | Extracted | 2026-10-25 |
 | Extracted by | `scripts/sync-upstream.sh <desktop-checkout>` → `git archive <sha> ale-core ale-modeld \| tar -x -C <this repo>` |
@@ -71,7 +71,7 @@ owned by this repository and lists the two crates as workspace members (it suppl
 manifests).
 
 Parity check performed after extraction (`scripts/verify-upstream-sync.sh <desktop-checkout>`):
-`ale-core/` and `ale-modeld/` are **byte-identical** to commit `43511cd` for every
+`ale-core/` and `ale-modeld/` are **byte-identical** to commit `23ef51d` for every
 file. `git archive` carries no `.git` metadata or `.DS_Store` files, so provenance
 lives in `UPSTREAM_COMMIT` and this file.
 
@@ -119,7 +119,7 @@ Preferred (both scripts are safe to re-run; neither commits anything):
 
 ## Deliberate local changes
 
-**As of the `43511cd` snapshot: none.** No source file, `Cargo.toml`, `build.rs`,
+**As of the `23ef51d` snapshot: none.** No source file, `Cargo.toml`, `build.rs`,
 test, fixture or asset of either crate was modified; `scripts/verify-upstream-sync.sh`
 reports both trees byte-identical to the pinned commit. The headless workspace
 resolves unmodified:
@@ -150,7 +150,7 @@ Environment: macOS (`Darwin arm64`), `rustc 1.96.0 (ac68faa20 2026-05-25)`,
 
 | Command | Result |
 | --- | --- |
-| `scripts/verify-upstream-sync.sh <desktop-checkout>` | **PASS** — `ale-core` and `ale-modeld` byte-identical to `43511cd` |
+| `scripts/verify-upstream-sync.sh <desktop-checkout>` | **PASS** — `ale-core` and `ale-modeld` byte-identical to `23ef51d` |
 | `cargo check -p ale-core` | **PASS** |
 | `cargo test -p ale-core` | **PASS** — 120 passed, 0 failed, 0 ignored (+0 doc-tests); includes harness tests, Misaka-Network v4 golden fixture and probe tests against the vendored `assets/model-probe.wav` |
 | `cargo check -p ale-modeld --no-default-features` | **PASS** (the configuration used for Debian arm64 packaging) |

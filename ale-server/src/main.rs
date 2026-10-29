@@ -109,6 +109,9 @@ async fn run_async(cli: Cli, loaded: LoadedConfig) -> anyhow::Result<()> {
     if cli.print_pairing {
         return print_pairing(&loaded.config);
     }
+    // Delete expired browser-task artifacts before serving traffic: a
+    // long-running instance must not fill its disk (SRV-03).
+    loaded.config.browser_tasks.prune_artifacts();
     run_server(loaded).await
 }
 

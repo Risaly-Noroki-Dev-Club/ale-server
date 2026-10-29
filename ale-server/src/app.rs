@@ -250,6 +250,7 @@ pub struct AppState {
     pub started: Instant,
     pub config_source: ConfigSource,
     pub config_path: PathBuf,
+    pub browser_task_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -291,6 +292,9 @@ impl AppState {
         config_source: ConfigSource,
     ) -> Self {
         let engine = EngineState::new(&config.engine);
+        let browser_task_slots = Arc::new(tokio::sync::Semaphore::new(
+            config.browser_tasks.max_concurrent,
+        ));
         Self {
             config: Arc::new(config),
             engine,
@@ -299,6 +303,7 @@ impl AppState {
             started: Instant::now(),
             config_source,
             config_path,
+            browser_task_slots,
         }
     }
 
@@ -339,6 +344,12 @@ pub fn build_router(state: AppState) -> Router {
             post(vlm_ask).layer(DefaultBodyLimit::max(MAX_IMAGE_BODY_BYTES)),
         )
         .route("/v1/device/status", get(device_status))
+        .route(
+            "/v1/tasks/browser",
+            post(crate::browser_tasks::submit).layer(DefaultBodyLimit::max(
+                state.config.browser_tasks.max_request_bytes,
+            )),
+        )
         .merge(crate::egress::router(egress_body_limit))
         .fallback(not_found);
 
@@ -426,6 +437,8 @@ struct HealthResponse {
     version: &'static str,
     engine_enabled: bool,
     engine_ready: bool,
+    /// `disabled` | `not_initialized` | `ready` | `failed`.
+    engine_state: &'static str,
     engine_error: Option<String>,
     device_enabled: bool,
     device_ready: bool,
@@ -434,13 +447,27 @@ struct HealthResponse {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let engine_error = state.engine.last_error();
-    let degraded =
-        state.config.engine.enabled && !state.engine.is_ready() && engine_error.is_some();
+    let engine_enabled = state.config.engine.enabled;
+    let engine_ready = state.engine.is_ready();
+    let degraded = engine_enabled && !engine_ready && engine_error.is_some();
+    // `status` stays "ok" until initialization has actually failed, but the
+    // explicit state tells probes that an enabled engine is still cold
+    // (SRV-08); it never claims readiness that does not exist.
+    let engine_state = if !engine_enabled {
+        "disabled"
+    } else if engine_ready {
+        "ready"
+    } else if engine_error.is_some() {
+        "failed"
+    } else {
+        "not_initialized"
+    };
     Json(HealthResponse {
         status: if degraded { "degraded" } else { "ok" },
         version: env!("CARGO_PKG_VERSION"),
-        engine_enabled: state.config.engine.enabled,
-        engine_ready: state.engine.is_ready(),
+        engine_enabled,
+        engine_ready,
+        engine_state,
         engine_error: engine_error.map(|message| truncate(&message, MAX_ERROR_MESSAGE_CHARS)),
         device_enabled: state.config.device.enabled,
         device_ready: state.device_ready(),

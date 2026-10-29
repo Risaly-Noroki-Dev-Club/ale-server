@@ -142,6 +142,9 @@ frame_max_age_ms = 5000
 [device.limits]
 # Concurrent device sessions (1..=32).
 max_connections = 4
+# Unauthenticated (pre-Noise) connections accepted per peer IP (1..=32). Bounds
+# a single peer that opens sockets without completing pairing.
+max_connections_per_ip = 2
 # In-flight requests per session (1..=16).
 max_concurrent_requests = 2
 # Largest accepted protocol message after decryption (64 KiB..=64 MiB).
@@ -173,6 +176,44 @@ timeout_s = 60
 # Request/response body caps in bytes (1 KiB..=64 MiB / 1 KiB..=256 MiB).
 max_body_bytes = 1048576
 max_response_bytes = 16777216
+
+# -----------------------------------------------------------------------------
+# [browser_tasks] - opt-in, server-owned read-only browser tasks
+# (POST /v1/tasks/browser). Disabled by default. Requires a loopback HTTP bind,
+# a loopback W3C WebDriver (headless Firefox + geckodriver) and an exact HTTPS
+# host grant. The route is loopback-only by peer IP, so never publish it through
+# a reverse proxy/SSH tunnel. See docs/BROWSER-TASKS.md.
+# -----------------------------------------------------------------------------
+[browser_tasks]
+enabled = false
+# Loopback WebDriver endpoint (http://127.0.0.1:<port>); Selenium/geckodriver.
+webdriver_url = "http://127.0.0.1:18764"
+# OpenAI Responses-compatible model endpoint: HTTPS, or loopback HTTP when a
+# local SSH reverse tunnel terminates the provider credential.
+model_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+# Environment variable that holds the browser-task model credential.
+api_key_env = "OPENAI_API_KEY"
+# Exact HTTPS DNS host names the task may navigate to. No wildcards, IPs,
+# ports other than 443, userinfo, paths outside the grant.
+allowed_hosts = []
+# Task artifact directory; must be writable by the service user.
+output_dir = "browser-task-output"
+# Delete artifact directories older than this many seconds (0 keeps forever).
+artifact_retention_s = 604800
+# Decision budget per task (1..=64).
+max_steps = 16
+# Concurrent tasks (1..=8); extra requests get HTTP 429.
+max_concurrent = 1
+# Whole-task deadline and per-WebDriver/model-call timeout (seconds).
+task_timeout_s = 600
+call_timeout_s = 90
+# Request/response/observation/markdown/token budgets.
+max_request_bytes = 16384
+max_response_bytes = 8388608
+max_page_chars = 100000
+max_markdown_bytes = 65536
+max_output_tokens = 8192
 
 # -----------------------------------------------------------------------------
 # [logging] - tracing output. The systemd units send stderr to journald.

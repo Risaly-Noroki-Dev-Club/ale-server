@@ -659,6 +659,15 @@ sudo ufw enable
 Change the bind addresses to `127.0.0.1` when a reverse proxy or SSH tunnel is
 the only intended path:
 
+> **Warning — loopback is not an authentication boundary.** The server treats
+> every peer whose source IP is loopback as trusted for the admin routes
+> (`/v1/device/status` — which returns the pairing code — and
+> `/v1/tasks/browser`). If you put nginx/Apache or an SSH tunnel in front of
+> `127.0.0.1:8080`, remote clients arrive with a loopback source address and can
+> read the pairing code and start browser tasks. Only expose the plain API
+> routes you intend through such a proxy, or keep the admin routes on a Unix
+> socket/loopback-only path that is never proxied.
+
 ```toml
 [server]
 bind = "127.0.0.1:8080"
@@ -666,7 +675,17 @@ bind = "127.0.0.1:8080"
 bind = "127.0.0.1:37655"
 ```
 
-(Then the device channel is not reachable from the LAN; only tunnel it.)
+(Then the device channel is not reachable from the LAN; only tunnel it, and
+remember the warning above: tunnelled clients still look loopback to the admin
+routes.)
+
+### Optional browser reading tasks
+
+`[browser_tasks]` (disabled by default) adds `POST /v1/tasks/browser`, which lets
+the server own a headless Firefox session (via a loopback W3C WebDriver) and
+write Markdown summaries. It additionally requires Firefox + geckodriver on the
+host, a loopback HTTP bind and an exact HTTPS host grant; artifacts are pruned by
+`artifact_retention_s`. See [BROWSER-TASKS.md](BROWSER-TASKS.md).
 
 ---
 

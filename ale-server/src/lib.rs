@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod app;
+pub mod browser_tasks;
 pub mod config;
 pub mod device;
 pub mod egress;

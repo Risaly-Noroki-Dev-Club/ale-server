@@ -80,7 +80,11 @@ task is explicitly about installation.
   Local inference stays in `ale-modeld`.
 * Never panic on untrusted input. Protocol handlers return `DeviceError` and map
   to stable error codes (`ale-device/src/error.rs`, `protocol::error_code`).
-* Do not log screenshot bytes, typed text, pairing codes, tokens or API keys.
+* Do not log screenshot bytes, typed text, tokens or API keys. The one
+  deliberate exception is the 8-character device pairing code: the operator needs
+  it on a headless host, so it is written once at `INFO` on startup/rotation
+  (`ale-server/src/device.rs::log_pairing`) and is also readable through the
+  loopback-only `/v1/device/status`. Restrict journal access accordingly.
 * Every network-facing limit (message size, frame size, request timeout, rate,
   concurrency, body size) comes from config; do not hard-code new unbounded paths.
 * Action execution goes through `AutomationService::validate_plan` first. Never

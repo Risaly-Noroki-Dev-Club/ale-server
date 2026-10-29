@@ -165,6 +165,8 @@ PAYLOAD_FILES=(
     "README.md:README.md"
     "LICENSE:LICENSE"
     "docs/DEPLOY.md:docs/DEPLOY.md"
+    "docs/BROWSER-TASKS.md:docs/BROWSER-TASKS.md"
+    "docs/API.md:docs/API.md"
     "docs/UPSTREAM.md:docs/UPSTREAM.md"
     "UPSTREAM_COMMIT:UPSTREAM_COMMIT"
 )

@@ -18,7 +18,7 @@ The desktop GUI is the *client / admin surface* and is not part of this workspac
 ```
 UPSTREAM_COMMIT         full sha of the vendored ale-my-eyes-desktop commit
 Cargo.toml              workspace manifest (members, shared deps, release profile)
-ale-core/               vendored from ale-my-eyes-desktop@43511cd: config, cloud
+ale-core/               vendored from ale-my-eyes-desktop@23ef51d: config, cloud
                         model calls, remote protocol types, task harness, model IPC
 ale-modeld/             vendored model scheduler daemon (feature `sensevoice` opt-in)
 ale-device/             headless device library: capture, automation, crypto,
@@ -129,7 +129,7 @@ Session flow (WebSocket binary frames, port `37_655` by default):
 
 * binary name: `ale-server`; config path default `/etc/ale/ale-server.toml`,
   override with `--config`; env overrides use the `ALE_SERVER__` prefix
-  (e.g. `ALE_SERVER__HTTP__BIND`).
+  (e.g. `ALE_SERVER__SERVER__BIND`).
 * HTTP listener: default `0.0.0.0:8080`; routes:
   `GET /health`, `GET /status`, `GET /models`, `POST /asr/transcribe`,
   `POST /tts/synthesize`, `POST /vlm/describe`, `POST /vlm/ask`.

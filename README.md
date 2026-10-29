@@ -33,7 +33,7 @@ x86_64 builds are supported too (see below).
 
 `ale-core` and `ale-modeld` are vendored from
 [`ale-my-eyes-desktop`](https://github.com/Risaly-Noroki-Dev-Club/ale-my-eyes-desktop)
-at commit `43511cd` (full sha in [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT)); see
+at commit `23ef51d` (full sha in [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT)); see
 [docs/UPSTREAM.md](docs/UPSTREAM.md) for provenance and local deviations
 (currently none). Run `bash scripts/verify-upstream-sync.sh <desktop-checkout>` to
 confirm byte identity; CI job `upstream-sync` enforces the same check against the
@@ -106,9 +106,10 @@ REST routes: `GET /health`, `GET /status`, `GET /models` (configuration view:
 cloud model identifiers plus local `ale-modeld` model names),
 `POST /asr/transcribe`, `POST /tts/synthesize` (downstream cloud TTS implemented
 by `ale-server`; the vendored core has no TTS), `POST /vlm/describe`,
-`POST /vlm/ask`, plus `GET /v1/device/status` (loopback only) and the
-token-protected `POST /v1/egress/{chat,vision,tts,asr}`. See
-[docs/API.md](docs/API.md).
+`POST /vlm/ask`, optional `POST /v1/tasks/browser` (opt-in, loopback only), plus
+`GET /v1/device/status` (loopback only) and the token-protected
+`POST /v1/egress/{chat,vision,tts,asr}`. See [docs/API.md](docs/API.md) and
+[docs/BROWSER-TASKS.md](docs/BROWSER-TASKS.md).
 
 ## Quickstart
 
@@ -188,7 +189,9 @@ sudo ./install.sh --system        # systemd system service, user "ale"
 `dist/ale-server-<version>-linux-aarch64.tar.gz` contains stripped binaries,
 the configuration template, both systemd units, `install.sh`, docs and a
 `SHA256SUMS` file. CI cross-compiles the same artifact for
-`aarch64-unknown-linux-gnu` and uploads it from every green build.
+`aarch64-unknown-linux-gnu` in the `build-aarch64` job (which needs the `test`
+job to pass) and uploads it as a workflow artifact; it is not published as a
+GitHub release asset.
 
 The complete guide — apt packages, Rust installation, Wayland/X11 capture
 backends (`grim`, `wtype`, `ydotool`, `xdotool`), uinput permissions, pairing,
@@ -217,8 +220,15 @@ firewall, upgrades and troubleshooting — is [docs/DEPLOY.md](docs/DEPLOY.md).
   `PrivateDevices`, a `@system-service` syscall filter and journald logging.
   Capture/automation backends are external commands selected at runtime, so the
   service itself links no X11/Wayland code.
-* **No secrets in logs** — pairing codes, tokens, screenshot bytes, typed text
-  and API keys are excluded from logs and the bounded audit log.
+* **No secrets in logs** — tokens, screenshot bytes, typed text and API keys are
+  excluded from logs and the bounded audit log. The 8-character pairing code is
+  the single deliberate exception: it is logged once at `INFO` (and exposed by
+  the loopback-only `/v1/device/status`) so a headless operator can pair a
+  terminal; protect journal access accordingly.
+* **Loopback-only routes are not a proxy boundary** — `/v1/device/status`,
+  `/v1/tasks/browser` and `/status` only check that the peer address is loopback.
+  A reverse proxy or SSH tunnel terminating on `127.0.0.1` makes remote clients
+  look local, so never publish those routes through one.
 
 ## Repository layout
 
@@ -244,6 +254,7 @@ docs/               architecture, contracts, protocol, API, deployment, upstream
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | device wire protocol, pairing flow, error codes |
 | [docs/API.md](docs/API.md) | HTTP routes, authentication, limits, error envelope |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Debian 12 / Raspberry Pi OS / Armbian arm64 guide |
+| [docs/BROWSER-TASKS.md](docs/BROWSER-TASKS.md) | Opt-in server-owned browser reading tasks |
 | [docs/UPSTREAM.md](docs/UPSTREAM.md) | provenance of the vendored desktop code |
 
 ## License

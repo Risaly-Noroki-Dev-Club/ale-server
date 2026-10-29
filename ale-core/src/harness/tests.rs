@@ -1,7 +1,7 @@
 use super::*;
 use simulation::{predicate, task, Desktop, Scenario, SettingsGrant, SettingsPlanner};
 
-async fn run_with(
+pub(super) async fn run_with(
     task: &Task,
     planner: &mut dyn Planner,
     desktop: &mut dyn Environment,
@@ -131,7 +131,7 @@ async fn foreground_change_after_input_is_an_unknown_outcome() {
     assert_eq!(desktop.dispatches, 1);
 }
 
-struct FixedPlanner(Decision);
+pub(super) struct FixedPlanner(pub(super) Decision);
 #[async_trait]
 impl Planner for FixedPlanner {
     async fn decide(&mut self, _: PlannerContext<'_>) -> Result<Decision, String> {
@@ -139,7 +139,7 @@ impl Planner for FixedPlanner {
     }
 }
 
-struct FixedAuth(Approval);
+pub(super) struct FixedAuth(pub(super) Approval);
 #[async_trait]
 impl Authorizer for FixedAuth {
     async fn authorize(&mut self, _: &Task, _: &ActionRequest) -> Approval {
@@ -147,7 +147,7 @@ impl Authorizer for FixedAuth {
     }
 }
 
-fn first_step() -> Step {
+pub(super) fn first_step() -> Step {
     Step {
         target_id: "menu".into(),
         operation: Operation::Invoke,
@@ -623,7 +623,7 @@ async fn cloud_disclosure_requires_explicit_task_permission() {
     assert_eq!(desktop.observations, 0);
 }
 
-fn cloud_response(arguments: serde_json::Value) -> serde_json::Value {
+pub(super) fn cloud_response(arguments: serde_json::Value) -> serde_json::Value {
     serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{"id":"decision","type":"function","function":{"name":"next_task_step","arguments":arguments.to_string()}}]}}]})
 }
 
@@ -724,4 +724,71 @@ async fn cloud_http_adapter_drives_full_loop_from_fresh_state_and_attempt_histor
         .await
         .unwrap()
         .unwrap();
+}
+
+fn decision_schema_accepts(tool: &serde_json::Value, arguments: &serde_json::Value) -> bool {
+    let validator = jsonschema::validator_for(&tool["function"]["parameters"]).unwrap();
+    validator.is_valid(arguments)
+}
+
+/// 观察模式只放宽 Invoke 的空后置条件；SetValue 在 schema 层仍必须读回（DC-02）。
+#[test]
+fn observation_mode_schema_still_requires_set_value_readback() {
+    let strict = cloud::decision_tool_for_mode(false);
+    let observing = cloud::decision_tool_for_mode(true);
+    let predicate = serde_json::json!([
+        {"role":"control", "label":"Zoom", "property":"value", "equals":"125"}
+    ]);
+    let invoke_empty = serde_json::json!({"decision":"act","step":{
+        "target_id":"menu", "operation":{"kind":"invoke"}, "expected":[], "explanation":"Observe the menu"}});
+    let set_value_empty = serde_json::json!({"decision":"act","step":{
+        "target_id":"edit", "operation":{"kind":"set_value","value":"125"}, "expected":[], "explanation":"Set zoom"}});
+    let set_value_readback = serde_json::json!({"decision":"act","step":{
+        "target_id":"edit", "operation":{"kind":"set_value","value":"125"}, "expected":predicate, "explanation":"Set zoom"}});
+
+    // 严格模式：Invoke 也不允许空 expected。
+    assert!(!decision_schema_accepts(&strict, &invoke_empty));
+    // 观察模式：未知下一页的 Invoke 允许空 expected。
+    assert!(decision_schema_accepts(&observing, &invoke_empty));
+    // 两种模式：SetValue 空 expected 都在 schema 层被拒绝。
+    assert!(!decision_schema_accepts(&strict, &set_value_empty));
+    assert!(!decision_schema_accepts(&observing, &set_value_empty));
+    // 提供读回条件后两种模式都接受。
+    assert!(decision_schema_accepts(&strict, &set_value_readback));
+    assert!(decision_schema_accepts(&observing, &set_value_readback));
+}
+
+#[tokio::test]
+async fn cloud_adapter_rejects_empty_set_value_evidence_in_observation_mode() {
+    // schema 层拒绝 → 云端决策失败，不会把 `NeedsUser` 终止交回运行器。
+    let arguments = serde_json::json!({"decision":"act", "step":{
+        "target_id":"menu", "operation":{"kind":"set_value","value":"125"}, "expected":[], "explanation":"bad"}});
+    let (url, captured) =
+        crate::model_api::tests::mock_http("200 OK", cloud_response(arguments), "").await;
+    let api = crate::cloud::RemoteCloudApi::new(crate::cloud::CloudConfig {
+        api_url: url,
+        ..Default::default()
+    });
+    let mut planner = cloud::CloudPlanner::new(std::sync::Arc::new(api));
+    let mut task = task("zoom").unwrap();
+    task.allow_cloud = true;
+    task.allow_observation_steps = true;
+    let observation = Desktop::new(Scenario::Normal).observe().await.unwrap();
+    let error = planner
+        .decide(PlannerContext {
+            task: &task,
+            observation: &observation,
+            attempts: &[],
+        })
+        .await
+        .unwrap_err();
+    // Newer adapters validate tool arguments against the generated schema
+    // inside `generate()` and surface a generic adapter error; the planner's
+    // own schema check may not run first. Either way the bad decision must be
+    // rejected instead of becoming a `NeedsUser` stop for the runner.
+    assert!(
+        error.contains("decision schema") || error.contains("Cloud planner request failed"),
+        "{error}"
+    );
+    captured.await.unwrap();
 }

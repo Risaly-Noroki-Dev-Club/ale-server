@@ -7,6 +7,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+impl AuditKind {
+    /// Stable lowercase identifier used in structured audit logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Disconnected => "disconnected",
+            Self::PairingFailed => "pairing_failed",
+            Self::Capture => "capture",
+            Self::Action => "action",
+            Self::Denied => "denied",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+            Self::Egress => "egress",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
@@ -44,11 +61,22 @@ impl AuditLog {
     }
 
     pub fn record(&self, session_id: &str, kind: AuditKind, detail: impl Into<String>) {
+        let detail = redact(&detail.into());
+        // Mirror security-relevant audit events into the structured service log
+        // (journald) so they survive the bounded in-memory ring (SRV-16).
+        // `detail` was already passed through `redact` (single line, 512 chars)
+        // and never contains pairing codes, tokens or screenshot bytes.
+        tracing::info!(
+            audit_kind = kind.as_str(),
+            session_id,
+            detail = %detail,
+            "device audit event"
+        );
         let entry = AuditEntry {
             time_unix_ms: crate::capture::now_unix_ms(),
             session_id: session_id.to_string(),
             kind,
-            detail: redact(&detail.into()),
+            detail,
         };
         if let Ok(mut entries) = self.entries.lock() {
             if entries.len() == self.capacity {

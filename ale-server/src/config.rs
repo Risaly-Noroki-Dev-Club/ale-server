@@ -48,6 +48,7 @@ pub struct Config {
     pub device: DeviceConfig,
     pub egress: EgressConfig,
     pub logging: LoggingConfig,
+    pub browser_tasks: crate::browser_tasks::BrowserTasksConfig,
 }
 
 /// `[server]` — HTTP listener settings.
@@ -519,6 +520,9 @@ impl Config {
             "device.limits.max_connections" => {
                 self.device.limits.max_connections = parse_field(var, raw)?
             }
+            "device.limits.max_connections_per_ip" => {
+                self.device.limits.max_connections_per_ip = parse_field(var, raw)?
+            }
             "device.limits.max_concurrent_requests" => {
                 self.device.limits.max_concurrent_requests = parse_field(var, raw)?
             }
@@ -538,6 +542,41 @@ impl Config {
             "egress.timeout_s" => self.egress.timeout_s = parse_field(var, raw)?,
             "egress.max_body_bytes" => self.egress.max_body_bytes = parse_field(var, raw)?,
             "egress.max_response_bytes" => self.egress.max_response_bytes = parse_field(var, raw)?,
+            "browser_tasks.enabled" => self.browser_tasks.enabled = parse_bool(var, raw)?,
+            "browser_tasks.webdriver_url" => self.browser_tasks.webdriver_url = raw.to_string(),
+            "browser_tasks.model_url" => self.browser_tasks.model_url = raw.to_string(),
+            "browser_tasks.model" => self.browser_tasks.model = raw.to_string(),
+            "browser_tasks.api_key_env" => self.browser_tasks.api_key_env = raw.to_string(),
+            "browser_tasks.allowed_hosts" => self.browser_tasks.allowed_hosts = parse_list(raw),
+            "browser_tasks.output_dir" => self.browser_tasks.output_dir = PathBuf::from(raw),
+            "browser_tasks.max_steps" => self.browser_tasks.max_steps = parse_field(var, raw)?,
+            "browser_tasks.max_concurrent" => {
+                self.browser_tasks.max_concurrent = parse_field(var, raw)?
+            }
+            "browser_tasks.task_timeout_s" => {
+                self.browser_tasks.task_timeout_s = parse_field(var, raw)?
+            }
+            "browser_tasks.call_timeout_s" => {
+                self.browser_tasks.call_timeout_s = parse_field(var, raw)?
+            }
+            "browser_tasks.max_request_bytes" => {
+                self.browser_tasks.max_request_bytes = parse_field(var, raw)?
+            }
+            "browser_tasks.max_response_bytes" => {
+                self.browser_tasks.max_response_bytes = parse_field(var, raw)?
+            }
+            "browser_tasks.max_page_chars" => {
+                self.browser_tasks.max_page_chars = parse_field(var, raw)?
+            }
+            "browser_tasks.max_markdown_bytes" => {
+                self.browser_tasks.max_markdown_bytes = parse_field(var, raw)?
+            }
+            "browser_tasks.max_output_tokens" => {
+                self.browser_tasks.max_output_tokens = parse_field(var, raw)?
+            }
+            "browser_tasks.artifact_retention_s" => {
+                self.browser_tasks.artifact_retention_s = parse_field(var, raw)?
+            }
             "logging.level" => self.logging.level = raw.to_string(),
             "logging.format" => self.logging.format = raw.to_string(),
             other => {
@@ -586,6 +625,9 @@ impl Config {
         }
 
         self.egress.validate()?;
+        self.browser_tasks
+            .validate(self.server.bind)
+            .map_err(ConfigError::Invalid)?;
         self.logging.validate()?;
         Ok(())
     }
@@ -615,6 +657,7 @@ impl Config {
                     .to_string(),
             },
             "device": device,
+            "browser_tasks": self.browser_tasks,
             "egress": {
                 "enabled": self.egress.enabled,
                 "upstream": self.egress.upstream,

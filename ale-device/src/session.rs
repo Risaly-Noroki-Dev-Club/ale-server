@@ -104,6 +104,51 @@ struct TokenRecord {
     expires_at: Instant,
 }
 
+/// Pre-authentication per-IP connection tracking.
+///
+/// The Noise handshake is the attacker-controlled phase of a connection.
+/// Without a per-IP cap a single peer could occupy every
+/// `limits.max_connections` slot with unauthenticated sockets for up to
+/// `HANDSHAKE_TIMEOUT`, denying pairing to legitimate terminals (SRV-05).
+struct IpConnectionGuard {
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for IpConnectionGuard {
+    fn drop(&mut self) {
+        let mut counts = lock(&self.counts);
+        let remove = match counts.get_mut(&self.ip) {
+            Some(count) => {
+                *count = count.saturating_sub(1);
+                *count == 0
+            }
+            None => false,
+        };
+        if remove {
+            counts.remove(&self.ip);
+        }
+    }
+}
+
+/// Reserve one pre-authentication slot for `ip`, or `None` when the per-IP cap
+/// is reached.
+fn try_register_ip_connection(
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+    max_per_ip: usize,
+) -> Option<IpConnectionGuard> {
+    {
+        let mut guard = lock(&counts);
+        let count = guard.entry(ip).or_insert(0);
+        if *count >= max_per_ip.max(1) {
+            return None;
+        }
+        *count += 1;
+    }
+    Some(IpConnectionGuard { counts, ip })
+}
+
 struct PairingFailure {
     failures: u32,
     window_started: Instant,
@@ -205,6 +250,9 @@ impl SessionService {
             return Ok(());
         }
         let connection_slots = Arc::new(Semaphore::new(self.config.limits.max_connections.max(1)));
+        let per_ip_connections: Arc<Mutex<HashMap<IpAddr, usize>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let max_per_ip = self.config.limits.max_connections_per_ip.max(1);
         let request_slots = Arc::new(Semaphore::new(
             self.config.limits.max_concurrent_requests.max(1),
         ));
@@ -233,6 +281,18 @@ impl SessionService {
                             continue;
                         }
                     };
+                    let Some(ip_guard) =
+                        try_register_ip_connection(Arc::clone(&per_ip_connections), addr.ip(), max_per_ip)
+                    else {
+                        tracing::warn!(%addr, "per-IP device connection limit reached; dropping connection");
+                        self.audit.record(
+                            "",
+                            AuditKind::Denied,
+                            format!("per-IP connection limit reached; dropped {addr}"),
+                        );
+                        drop(stream);
+                        continue;
+                    };
                     let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
@@ -247,6 +307,7 @@ impl SessionService {
                     let request_slots = Arc::clone(&request_slots);
                     tasks.spawn(async move {
                         let _permit = permit;
+                        let _ip_guard = ip_guard;
                         if let Err(error) = service
                             .handle_connection(stream, addr, connection_shutdown, request_slots)
                             .await
@@ -303,7 +364,21 @@ impl SessionService {
                 matched = Some(record.clone());
             }
         }
-        matched.map(|record| record.descriptor)
+        drop(tokens);
+        let record = matched?;
+        // A token is only valid while its session is alive: closing the
+        // terminal must revoke egress access immediately even if the token TTL
+        // (`pairing.token_ttl_s`, default 24 h) has not expired yet (SRV-01).
+        if !lock(&self.sessions).contains_key(&record.descriptor.session_id) {
+            return None;
+        }
+        Some(record.descriptor)
+    }
+
+    /// Drop every egress token that belongs to `session_id`.
+    fn revoke_session_tokens(&self, session_id: &str) {
+        let mut tokens = lock(&self.tokens);
+        tokens.retain(|_, record| record.descriptor.session_id != session_id);
     }
 
     pub fn session_count(&self) -> usize {
@@ -980,6 +1055,7 @@ impl SessionService {
             writer.abort();
         }
         lock(&self.sessions).remove(&session_id);
+        self.revoke_session_tokens(&session_id);
         self.audit.record(
             &session_id,
             AuditKind::Disconnected,
@@ -1456,4 +1532,33 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_ip_connection_cap_rejects_extra_and_releases_slots() {
+        let counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let other: IpAddr = "192.0.2.11".parse().unwrap();
+
+        let first = try_register_ip_connection(Arc::clone(&counts), ip, 2).expect("first slot");
+        let second = try_register_ip_connection(Arc::clone(&counts), ip, 2).expect("second slot");
+        assert!(
+            try_register_ip_connection(Arc::clone(&counts), ip, 2).is_none(),
+            "third unauthenticated connection from one IP must be rejected"
+        );
+        // Other peers are unaffected by one noisy source.
+        let _third = try_register_ip_connection(Arc::clone(&counts), other, 2).expect("other ip");
+
+        drop(first);
+        let reused = try_register_ip_connection(Arc::clone(&counts), ip, 2)
+            .expect("a released slot must be reusable");
+        drop(second);
+        drop(reused);
+        drop(_third);
+        assert!(lock(&counts).is_empty(), "all slots must be released");
+    }
 }
